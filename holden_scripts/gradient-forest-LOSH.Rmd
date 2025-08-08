@@ -1,0 +1,754 @@
+---
+title: "gradient-forest-tutorial.LOSH"
+author: "Holden"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/holdenfox/Desktop/shrike-gen/gea/")
+# run this line in ur console
+setwd("/Users/holdenfox/Desktop/shrike-gen/gea/")
+```
+
+The R package gradientForest utilizes a flexible non-parametric functions to quantify multi-species compositional turnover along environmental gradients. In the era of next-generation sequencing, where genome-wide data is common, we can extend this to determine which variants are associated with specific environmental variables. So rather than thinking of the large-scale species turnover in space, we can map fine-scale allele-frequency changes along environmental gradients. 
+
+Below is code for quantifying and visualizing intraspecific gene-environment variation across space. We can compare present-day gene-environment associations to predicted future changes to identify regions of genomic vulnerability. For now, this tutorial focuses on analyzing and plotting the allelic variation as estimated from gradient forest for a single species, the Loggerhead Shrike, but is easily adapated to include other species and methods for estimating variation.
+
+## Where to run
+On an HPC, it is easy enough to install gradientForest into a mamba environment. With whole genomes, gradientForest will run a lot better on a cluster (unless your local machine is a beast. Although you can run any of these steps a laptop by randomly subsetting the snp dataset to a more manageable size.
+
+## Prerequisites
+We're gonna need two files for this run:
+(1) allele frequencies per population, and
+(2) a file(s) with env variables.
+
+## Calculate allele frequencies within populations
+
+When calculating allele frequencies per population, we want to define populations as a collection of 4 or more samples within 1 square latitude, longitude of each other. For gradientForest and RDA, we won't consider populations with a sample size < 4 :/
+After filtering out individuals that do not meet this criteria, we must remove snps with missing data. You might be able to use an imputed vcf as well, not sure.
+
+Gradient forest should install pretty easy on windows machines. Initially I had trouble installing it on an apple silicon macbook. You can install gradientForest on an apple-silicon mac by explicitly forcing the use of gcc-14 from homebrew instead of the default gcc (apple clang) with this command:
+
+P.S. You should install gfortran (dependency for gradientForest) with homebrew first if using this route.
+
+```{r, message=FALSE, warning=FALSE}
+#install.packages("gradientForest", repos="http://R-Forge.R-project.org", configure.vars = "CC=/opt/homebrew/bin/gcc-14 CXX=/opt/homebrew/bin/g++-14 FC=/opt/homebrew/bin/gfortran")
+```
+
+load dependencies
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(geosphere)
+library(gradientForest)
+library(plotly)
+```
+
+prep metadata and filter individuals
+```{r, message=FALSE, warning=FALSE}
+# individuals used for pop structure analysis
+inds <- read.table("../pca/Apr-25/sample_list_311.tsv", col.names = "BGP_ID")
+
+# filter metadata
+meta <- read.csv("../pca/Apr-25/data/LOSH Master - Library Master.csv") %>%
+  filter(BGP_ID %in% inds$BGP_ID) %>%
+  dplyr::select(-c(Picogreen_ng_ul, BandQuality, ReRunPlateName, ReRunPlatePosition, LibraryPlateName, LibraryPlatePosition, FullLibraryName, Notes)) %>%
+  mutate(CityTown = if_else(CityTown == "Los Angeles", "Los Angeles, San Clemente Island", CityTown)) %>% 
+  distinct() %>% 
+   mutate(
+    Lat = if_else(BGP_ID == "22N13856", 37.1057, Lat),
+    Long = if_else(BGP_ID == "22N13856", -80.6853, Long)
+  )
+```
+
+By far the oldest samples that group into populations w/ > 3 individuals by geographic distance are from Santa Catalina Island (1949). These are also their own population by hierarchical admixture and might warrant separation on that basis alone, yet there are just two and if separated they would be dropped. So let's drop them out of this analysis.
+```{r, message=FALSE, warning=FALSE}
+meta <- meta %>% filter(!BGP_ID %in% c("24N19838", "24N19839"))
+```
+
+```{r, message=FALSE, warning=FALSE}
+coords <- meta %>% dplyr::select(Long, Lat)
+
+# calculate distance matrix using Haversine distance
+dist_matrix <- distm(as.matrix(coords), fun = distHaversine)
+
+# clustering
+hclust_groups <- hclust(as.dist(dist_matrix), method = "complete") # complete method here avoids chaining, ensuring all samples in a cluster are within the specified distance of each other. If you want some flexibility you could try "average"
+
+# cut tree at 111.111 km to assign spatial clusters
+meta$GroupID <- cutree(hclust_groups, h = 111111)
+
+# create population labels and filter for minimum cluster size
+meta <- meta %>%
+  mutate(Pop = paste0("Cluster_", GroupID)) %>%
+  group_by(Pop) %>%
+  filter(n() > 3) %>%  # keep clusters with ≥4 individuals
+  ungroup()
+
+```
+
+Now that we have defined our populations, let's plot them and make sure they are what we intended.
+```{r}
+# import base map
+map <- ne_states(country = c("United States of America", "Canada", "Mexico"), returnclass = 'sf')
+
+# import shrike range from ebird
+shrike_range <- st_read("/Users/holdenfox/Desktop/shrike-gen/meta/logshr_range_2022/logshr_range_2022.gpkg") %>%
+  filter(season == "breeding") %>%
+  st_set_crs(4326)
+
+# create colors for clusters
+n_clusters <- length(unique(meta$Pop))
+cluster_colors <- rainbow(n_clusters)
+names(cluster_colors) <- unique(meta$Pop)
+
+meta <- meta %>%
+  group_by(Pop) %>%
+  mutate(cluster_size = n()) %>%
+  ungroup()
+
+# plot it
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_sf(data = shrike_range, fill = "grey", color = NA, alpha = 0.5) +
+  geom_point(data = meta, aes(x = Long, 
+                              y = Lat, 
+                              color = Pop,
+                              text = paste0(
+                                "BGP_ID: ", BGP_ID, "<br>",
+                                "Cluster: ", Pop, "<br>",
+                                "Cluster Size: ", cluster_size, "<br>",
+                                "CollectionDate: ", CollectionDate, "<br>")), 
+             size = 1.5, position = position_jitter(width = 0.1, height = 0.1)) +
+  scale_colour_manual(values = cluster_colors, name = "Spatial Clusters", guide = "none") +
+  coord_sf(xlim = c(-140, -65), ylim = c(15, 50)) + 
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+
+
+ggplotly(p, tooltip = "text")
+```
+
+Looks good. Now that we've defined our populations, let's create a file to filter with. Make the FID column (the first column) the same as in your .fam file. It's probably worth checking what that looks like now. It's likely either 0 or equal to IID. My FID == IID, so I'll populate both columns with BGP_ID here.
+```{r}
+ pops <- data.frame(FID = meta$BGP_ID, IID = meta$BGP_ID, Group = meta$Pop) %>% 
+   write.table(file = "sample_list_34pop.tsv", sep= "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+#pops <- data.frame(FID = meta$BGP_ID) %>% write.table(file = "sample_list_269.txt", sep= "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+Let's pop over to the cluster where our filtered & imputed vcf file is (mine is on Ovis) for the allele frequency calculations in plink. You'll want to throw the pop.txt file you created up there too.
+
+after filtering individuals, i imputed and ld pruned. Then i created a bed file with snp ids
+```{bash}
+plink --vcf 311ind-pass-maf05-snp-miss50-scafmt10-gtglimpute4.1-exclLD50-5-0.5.vcf.gz --recode --aec --out 311ind-pass-maf05-snp-miss50-scafmt10-gtglimpute4.1-exclLD50-5-0.5
+
+head 311ind-pass-maf05-snp-miss50-scafmt10-gtglimpute4.1-exclLD50-5-0.5.map
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	283
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	285
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1132
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1173
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1243
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1260
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1359
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1428
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1832
+ScTjWWh_1022-HRSCAF-1675_RagTag	.	0	1893
+
+awk '{if ($2 == ".") $2 = $1 ":" $4; print }' 311ind-pass-maf05-snp-miss50-scafmt10-gtglimpute4.1-exclLD50-5-0.5.map > tmp && mv tmp 3111ind-pass-maf05-snp-miss50-scafmt10-gtglimpute4.1-exclLD50-5-0.5.map
+
+head 311ind-pass-maf05-snp-miss80-scafmt10-gtglimpute4.1-exclLD50-5-0.5.map
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:283 0 283
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:285 0 285
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1132 0 1132
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1173 0 1173
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1243 0 1243
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1260 0 1260
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1359 0 1359
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1428 0 1428
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1832 0 1832
+ScTjWWh_1022-HRSCAF-1675_RagTag ScTjWWh_1022-HRSCAF-1675_RagTag:1893 0 1893
+
+
+plink --file 269ind-pass-maf05-snp-miss80-scafmt10-gtglimpute4.1-exclLD50-5-0.5 --make-bed --aec --out 269ind-pass-maf05-snp-miss80-scafmt10-gtglimpute4.1-exclLD50-5-0.5
+
+# now i should be able to create the pop allele frequency file
+plink --bfile 269ind-pass-maf05-snp-miss80-scafmt10-gtglimpute4.1-exclLD50-5-0.5 --freq --within sample_list_34pop.txt --aec --out 269ind-pass-maf05-snp-miss80-scafmt10-gtglimpute4.1-exclLD50-5-0.5
+
+```
+
+
+```{bash}
+# on macbook
+rsync Desktop/shrike-gen/gea/losh.34pop.txt foxhol@ovis.biology.colostate.edu:/home/foxhol/LOSH-Apr-24/results/post-bcf2/
+# on cluster
+mamba activate plink
+plink --vcf pass-maf-0.05-SNP-5miss-294-rm-scaf-lth10-gtgl-impute4.1-snpid.vcf.gz --make-bed --out pass-maf-0.05-SNP-5miss-294-rm-scaf-lth10-gtgl-impute4.1-snpid --aec
+plink --bfile pass-maf-0.05-SNP-5miss-267-rm-scaf-lth10-gtgl-impute4.1-snpid --freq --within losh.33pop.txt --aec --out pass-maf-0.05-SNP-5miss-267-rm-scaf-lth10-gtgl-impute4.1-snpid
+```
+
+If I ls -lh this, it is 3.2GB. That's pretty hefty. My losh data has around 1 million snps and is too large for GF. So i need to 50k and 200k snps. Let's get an interactive node on alpine to do this. You'll want to read in the plink file, subset, select allele frequency(MAF), SNP ID (SNP) and population (CLST), then transpose so that the allele frequency for each population is a row, and the subset of snps are the columns.
+
+```{bash}
+sinteractive --partition=amilan --time=02:00:00 --ntasks=4
+mamba activate gradientForest
+R
+```
+```{r}
+library(data.table)
+library(tidyverse)
+
+df <- fread("pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1.frq.strat", header=TRUE)
+set.seed(42)
+# set.seed(43)
+# set.seed(44)
+sampled_snps <- df %>% distinct(SNP) %>% sample_n(50000)
+# sampled_snps <- df %>% distinct(SNP) %>%  sample_n(200000)
+subset50k <- df %>% filter(SNP %in% sampled_snps$SNP) %>% select(SNP, CLST, MAF)
+# subset200k <- df %>% filter(SNP %in% sampled_snps$SNP) %>% select(SNP, CLST, MAF)
+subset50k_wide <- subset50k %>% pivot_wider(names_from = SNP, values_from = MAF) %>% select(-1)
+# subset200k_wide <- subset200k %>% pivot_wider(names_from = SNP, values_from = MAF) %>% select(-1)
+write.table(as.data.frame(subset50k_wide), file="losh.33pop.frq.strat.50k.txt", row.names=F, quote=F, sep="\t")
+# write.table(as.data.frame(subset200k_wide), file="losh.33pop.frq.strat.200k.txt", row.names=F, quote=F, sep="\t")
+```
+
+## Retrieve Environmental Variables
+
+Now let's load your env variables. Follow along in env-vars.Rmd to get the input file for this step. You'll probably want to load only the variables where you have >= 4 samples (i.e. if the allele frequency file you generated just now has fewer inds than your vcf, you'll want to subset these). Fortunately losh.33pop.txt has this inds list. You can select col 3 in R or use awk '{print $2}' on the cluster and feed that list into worldclim.Rmd to subset appropriately. 
+
+Run on alpine!
+```{r}
+pops <- read.table(file = "sample_list_34pop.tsv", sep="\t", header = FALSE) %>% rename(FID = V1, IID = V2, Group = V3)
+climgroups <- pops %>% dplyr::select(IID, Group) %>% rename(BGP_ID = IID, ClimGroup = Group)
+
+clim <- read_delim("env-variables/LOSH.264ind.33pop.worldclim.txt", delim = "\t") %>% 
+  left_join(climgroups, by = "BGP_ID") %>%
+  dplyr::select(starts_with("wc2.1_30s_bio_"), ClimGroup) %>%
+  group_by(ClimGroup) %>% 
+  summarise(n=n(),across(starts_with("wc2.1_30s_bio_"), mean)) %>% 
+  filter(n>2)
+
+hii <- read_delim("env-variables/LOSH.264ind.33pop.hii.txt", delim = "\t") %>% 
+  left_join(climgroups, by = "BGP_ID") %>%
+  dplyr::select(NA_Human_Influence_Index, ClimGroup) %>% 
+  group_by(ClimGroup) %>% 
+  summarise(n=n(), mean(NA_Human_Influence_Index)) %>% 
+  filter(n>2)
+
+ndvi.max <- read_delim("env-variables/LOSH.264ind.33pop.ndvi.max.txt", delim = "\t") %>% 
+  left_join(climgroups, by = "BGP_ID") %>%
+  dplyr::select(ndvimax, ClimGroup) %>% 
+  group_by(ClimGroup) %>% 
+  summarise(n=n(), mean(ndvimax)) %>% 
+  filter(n>2)
+
+ndvi.sd <- read_delim("env-variables/LOSH.264ind.33pop.ndvi.sd.txt", delim = "\t") %>% 
+  left_join(climgroups, by = "BGP_ID") %>%
+  dplyr::select(ndvistd, ClimGroup) %>% 
+  group_by(ClimGroup) %>% 
+  summarise(n=n(), mean(ndvistd)) %>% 
+  filter(n>2)
+
+landcover_buffer <- read_delim("env-variables/LOSH.267ind.33pop.perclandcover.500mradius.txt", delim = "\t")
+
+## reorder so that env and alle frequencies per pop are reported in the same order
+poporder <- read.table(file = "~/Downloads/pop.order.txt", header = F) %>% rename(ClimGroup = V1)
+clim_ordered <- poporder %>% left_join(clim) %>% dplyr::select(-n)
+hii_ordered <- poporder %>% left_join(hii) %>% dplyr::select(-n)
+landcover_ordered <- poporder %>%  left_join(landcover_buffer)
+ndvi.max_ordered <- poporder %>% left_join(ndvi.max) %>% dplyr::select(-n)
+ndvi.sd_ordered <- poporder %>% left_join(ndvi.sd) %>% dplyr::select(-n)
+
+Elosh <- left_join(clim_ordered, hii_ordered, by = "ClimGroup")
+Elosh <- left_join(Elosh, landcover_ordered, by = "ClimGroup")
+Elosh <- left_join(Elosh, ndvi.max_ordered, by = "ClimGroup")
+Elosh <- left_join(Elosh, ndvi.sd_ordered, by = "ClimGroup") %>% dplyr::select(-ClimGroup)
+#Elosh <- clim_ordered %>% dplyr::select(-ClimGroup)
+#write.table(Elosh, file = "losh.clim.poporder.txt", row.names=F, quote=F, sep="\t")
+```
+
+Hopefully that worked out ok. Finally we are on to running the gradient forest. The gradient forest is going to run on the cluster again. I'm going to continue working on an interative node for troubleshooting, but it would certainly run as a slurm job.
+
+We must first define a few variables that gradient forest needs and then we can run program with a single command.
+
+You need gradient forest loaded in R to plot correctly, so I am creating the plots on the cluster, saving them with a pdf device.
+
+This runs on the cluster
+```{r}
+library(tidyverse)
+library(data.table)
+library(gradientForest)
+Elosh <- read.table(file="losh.clim.hii.lc1km.ndvi.poporder.txt", sep="\t", header=T) #%>% select(-ClimGroup, -n)
+Glosh <- fread("losh.33pop.frq.strat.50k.txt",sep="\t")
+dim(Glosh)
+colnames(Glosh) <- make.names(colnames(Glosh))
+
+preds <- colnames(Elosh)
+specs <- colnames(Glosh)
+
+nSites <- dim(Glosh)[1]
+nSpecs <- dim(Glosh)[2]
+
+# set depth of conditional permutation
+lev <- floor(log2(nSites*0.368/2))
+lev
+
+loshforest=gradientForest(cbind(Elosh,Glosh), predictor.vars=preds, response.vars=specs, ntree=100, transform = NULL, compact=T,nbin=101, maxLevel=lev,trace=T)
+
+saveRDS(loshforest,file="losh.clim.hii.lc1km.ndvi.GF_results.50kb_A.rds")
+
+pdf("losh.clim.hii.lc1km.ndvi.GF.50kb_A.Overall_Imp_Ranking.pdf")
+plot(loshforest,plot.type="Overall.Importance")
+dev.off()
+```
+
+try shuffling the order of the predictors and env variables randomly 10 different times to see if the R^2 from your gradient forest is significantly different. especially the magnitude
+
+
+
+This first plot and most useful from gradientForest is the predictor overall importance plot, which shows a simple barplot of the ranked importances of the physical variables. This shows the mean accuracy importance and the mean importance weighted by SNP R^2. The most reliable importances are the R^2 weighted importances.
+```{r}
+cor(Elosh,method="pearson") %>% write.table("losh.env_corr.table.txt",row.names=T,quote=F,sep="\t")
+cor_matrix <- read.table("losh.env_corr.table.txt", header = TRUE, row.names = 1, sep = "\t")
+
+threshold <- 0.7 
+
+highly_correlated <- which(abs(cor_matrix) > threshold, arr.ind = TRUE)
+
+# remove diagonal to avoid self-correlation
+highly_correlated <- highly_correlated[highly_correlated[, 1] != highly_correlated[, 2], ]
+
+# pairs
+highly_correlated_pairs <- data.frame(
+  Var1 = rownames(cor_matrix)[highly_correlated[, 1]],
+  Var2 = rownames(cor_matrix)[highly_correlated[, 2]],
+  Correlation = cor_matrix[highly_correlated]
+)
+
+```
+
+
+```{r}
+select_uncorrelated <- function(predictors, cor_matrix, threshold = 0.7, top_n = 6) {
+  # init empty vector
+  selected <- c()
+  
+  for (var in predictors) {
+    # check if uncorrelated w/ all previously selected variables
+    if (length(selected) == 0 || all(abs(cor_matrix[var, selected]) < threshold)) {
+      selected <- c(selected, var)  # select
+    }
+    if (length(selected) == top_n) {
+      break
+    }
+  }
+  
+  return(selected)
+}
+
+# ranked_predictors <- c("Var1", "Var2", "Var3", "Var4", "Var5", "Var6", "etc")
+ranked_predictors <- c("wc2.1_30s_bio_18", "wc2.1_30s_bio_12", "wc2.1_30s_bio_16", "wc2.1_30s_bio_13", "wc2.1_30s_bio_8", "mean(ndvimax)" , "wc2.1_30s_bio_7", "wc2.1_30s_bio_14", "wc2.1_30s_bio_17", "wc2.1_30s_bio_2", "wc2.1_30s_bio_15", "wc2.1_30s_bio_3", "Cropland")
+
+Elosh_subset <- Elosh[, ranked_predictors, drop = FALSE]
+cor_matrix <- cor(Elosh_subset, method = "pearson")
+colnames(cor_matrix) <- rownames(cor_matrix) <- ranked_predictors
+diag(cor_matrix) <- 1
+top_uncorrelated <- select_uncorrelated(ranked_predictors, cor_matrix, threshold = 0.7, top_n = 6)
+print(top_uncorrelated)
+
+top6_env <- 
+
+
+```
+
+################################################################################
+
+# Genomic offset calculations
+
+### 3. Basic Gradient Forest Preparation
+
+Now that you see how Gradient Forest is run, let's plot the results spatially. The model was based on 33 locations within the LOSH range. We’ll use 50,000 random points with associated environmental data for a continuous view of environmental associations.
+
+#### Load Random Points with Environmental Predictors
+```{r}
+birdgrid <- read.table("env-variables/LOSH.top4env.50kb.random.sites.txt", header = TRUE, sep = "\t")
+
+# need to be the same name as the gradient forest model
+birdgrid <- rename(birdgrid, wc2.1_30s_bio_18 = bio18, 
+                   wc2.1_30s_bio_8 = bio8,
+                   wc2.1_30s_bio_7 = bio7,
+                   wc2.1_30s_bio_2 = bio2)
+
+birdgrid
+dim(birdgrid)
+```
+
+
+#### We know the top 4 uncorrelated predictors are: bio 18, 8, 76, and 2
+```{r}
+# names of cols
+pred <- c("wc2.1_30s_bio_18", "wc2.1_30s_bio_8", "wc2.1_30s_bio_7", "wc2.1_30s_bio_2")
+
+gradientforest_model <- read_rds("/Users/holdenfox/Downloads/losh.clim.hii.lc500m.ndvi.GF_results.200kb_A.rds")
+
+currentgrid <- cbind(birdgrid[, c("long", "lat")],
+                      predict(gradientforest_model, birdgrid[, pred]))
+
+currentgrid
+```
+Compare these stats to the randomized env vars and genotypes gradient forest
+```{r}
+# convert the matrix to a dataframe and add row names as a column
+imp_df <- as.data.frame(gradientforest_model$imp.rsq) %>%
+  rownames_to_column(var = "Environmental_Variable") 
+
+# pivot longer to get SNPs in a long format
+imp_long <- imp_df %>%
+  pivot_longer(cols = -Environmental_Variable, 
+               names_to = "SNP", 
+               values_to = "R2")
+
+pos_r2 <- imp_long %>% filter(R2 > 0) %>% group_by(SNP) %>% tally()
+
+mean_r2 <- imp_long %>% filter(R2 > 0) %>% summarise(mean_r2 = mean(R2))
+mean_r2
+```
+
+We’ll focus on the top 4 uncorrelated variables:
+
+#### Principal Component Analysis (PCA) and RGB Conversion
+```r
+PCs <- prcomp(currentgrid[, 3:6])
+a1 <- PCs$x[,1]
+a2 <- PCs$x[,2]
+a3 <- PCs$x[,3]
+r <- (a1 + a2 - min(a1 + a2)) / (max(a1 + a2) - min(a1 + a2)) * 255
+g <- (-a2 - min(-a2)) / (max(-a2) - min(-a2)) * 255
+b <- (a3 + a2 - a1 - min(a3 + a2 - a1)) / (max(a3 + a2 - a1) - min(a3 + a2 - a1)) * 255
+roficols <- rgb(r, g, b, max = 255)
+```
+```{r}
+# run PCA on your environmental variables
+PCs <- prcomp(currentgrid[, 3:6], center = TRUE, scale. = TRUE)
+
+# extract principal component scores
+a1 <- PCs$x[,1]
+a2 <- PCs$x[,2]
+a3 <- PCs$x[,3]
+
+# convert PCs to RGB color values
+r <- a1 + a2
+g <- -a2
+b <- a3 + a2 - a1
+
+# normalize values to 0-255 range
+r <- (r - min(r)) / (max(r) - min(r)) * 255
+g <- (g - min(g)) / (max(g) - min(g)) * 255
+b <- (b - min(b)) / (max(b) - min(b)) * 255
+
+# create RGB colors
+loshcols <- rgb(r, g, b, max = 255)
+loshcols2 <- col2rgb(loshcols)
+loshcols3 <- t(loshcols2)
+
+# bind colors with lat/long data
+gradients <- cbind(currentgrid[, c("long", "lat")], loshcols3)
+
+# view first few rows
+head(gradients)
+```
+
+```{r, fig.cap = "A principal component plot of the top 4 uncorrelated variables"}
+# create a biplot
+nvs <- dim(PCs$rotation)[1]
+vec <- c("wc2.1_30s_bio_18", "wc2.1_30s_bio_8", "wc2.1_30s_bio_7", "wc2.1_30s_bio_2")  # Updated to match your variables
+lv <- length(vec)
+vind <- rownames(PCs$rotation) %in% vec
+scal <- 1
+
+#set x and y ranges for the plot
+xrng <- range(PCs$x[, 1], PCs$rotation[, 1] / scal) * 1
+yrng <- range(PCs$x[, 2], PCs$rotation[, 2] / scal) * 1
+
+# plot the PCA points colored by LOSH-based RGB values
+plot(PCs$x[, 1:2], xlim = xrng, ylim = yrng, pch = ".", cex = 4, 
+     col = rgb(r, g, b, max = 255), asp = 1)
+
+# add variable loadings
+points(PCs$rotation[!vind, 1:2] / scal, pch = "+")
+arrows(rep(0, lv), rep(0, lv), PCs$rotation[vec, 1] / scal, 
+       PCs$rotation[vec, 2] / scal, length = 0.0625)
+
+# label variable vectors with slight jitter
+jit <- 0.0015
+text(PCs$rotation[vec, 1] / scal + jit * sign(PCs$rotation[vec, 1]), 
+     PCs$rotation[vec, 2] / scal + jit * sign(PCs$rotation[vec, 2]), 
+     labels = vec)
+```
+
+```{r}
+### try making the gf map again
+
+library(sf)
+library(sp)
+library(ggplot2)
+library(ggspatial)
+library(dplyr)
+library(rnaturalearth)
+
+# download layers from Natural Earth
+coastlines <- ne_download(scale = 50, type = "coastline", category = "physical", destdir = tempdir())
+countries <- ne_download(scale = 50, type = "countries", category = "cultural", destdir = tempdir())
+
+# crop the layers to the region of interest
+domain <- c(
+  xmin = -125, 
+  xmax = -63,
+  ymin = 15,
+  ymax = 55
+)
+
+# natural earth states wasn't very happy
+states_cropped <- read_sf("../genoscape_maps/shapefiles/ne_shapefiles/ne_10m_admin_1_states_provinces_lines.shp") %>%
+  st_crop(domain) %>% 
+  st_set_crs(st_crs(4326))
+
+
+coast_cropped <- st_crop(coastlines, domain) %>% st_set_crs(st_crs(4326))
+countries_cropped <- st_crop(countries, domain) %>% st_set_crs(st_crs(4326))
+
+
+# plot the initial map to check the extent and features
+mapg <- ggplot() +
+  geom_sf(data = coast_cropped) +
+  geom_sf(data = countries_cropped, fill = NA) +
+  geom_sf(data = states_cropped, fill = NA) +
+  theme_bw()
+mapg
+
+# project and crop the map for the region of interest, here using Lambert Conformal Conic (LCC) projection
+lamproj <- "+proj=lcc +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-100 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+
+# assuming your `current_grid` has columns 'long', 'lat', and RGB columns (r, g, b):
+
+# convert RGB values from your analysis
+loshcols <- rgb(r, g, b, max = 255)
+loshcols2 <- col2rgb(loshcols)
+loshcols3 <- t(loshcols2)
+
+# combine coordinates with RGB values
+gradients <- cbind(currentgrid[c("long", "lat")], loshcols3)
+loshmap <- gradients
+
+# set spatial coordinates and projection for the gradient map
+coordinates(loshmap) <- ~long + lat
+proj4string(loshmap) <- CRS("+proj=longlat +datum=WGS84")
+
+# plot the map with the gradient forest model for Loggerhead Shrike
+rectangled <- ggplot() +
+  geom_sf(data = coast_cropped) +
+  geom_sf(data = countries_cropped, fill = NA) +
+  geom_sf(data = states_cropped, fill = NA) +
+  ggspatial::layer_spatial(loshmap, col = rgb(r, g, b, max = 255), pch = 15) + 
+  xlab("Longitude") + ylab("Latitude") +
+  coord_sf()
+
+# display the map
+rectangled
+```
+
+The plots above are the genotype-environment relationship given present-day climate rasters. However, we know rapid fluctuations in temperature and precipitation associated with climate change can alter the suitability of particular regions making it necessary for individuals to either adapt, disperse or die if the changes are extreme enough. Those species that possess standing genetic variation for climate-related traits (i.e. have adaptive capacity) are most likely to have the ability to adapt to rapidly changing environments. Those species that unable to adapt are deemed most vulnerable.
+
+To investigate which populations might be most vulnerable to future climate change, we defined the metric “genomic vulnerability” as the mismatch between current and predicted future genomic variation based on genotype-environment relationships modeled across contemporary populations. We followed the method presented in Fitzpatrick and Keller (2015) to calculate genomic vulnerability using an extension of the gradient forest analysis. Populations with the greatest mismatch are least likely to adapt quickly enough to track future climate shifts, potentially resulting in population declines or extirpations.
+
+Here, we read in the future climate predictions for each random point. Since different amounts of heat-trapping gases released into the atmosphere by human activities produce different projected increases in Earth’s temperature, we provided two such predicted models: the 2.6 emission predictions and the 8.5 emission predictions for the year 2050. 
+
+The lowest recent emissions pathway (RCP), 2.6, assumes immediate and rapid reductions in emissions and would result in about 2.5°F of warming in this century. The highest emissions pathway, RCP 8.5, roughly similar to a continuation of the current path of global emissions increases, is projected to lead to more than 8°F warming by 2100, with a high-end possibility of more than 11°F. Each of these is a composite of multiple prediction models and have rather different predictions.
+
+```{r}
+
+# chill climate scenario
+future1 <- read.table("env-variables/LOSH.top4env.50kb.random.sites.ssp126.pred.txt", header = TRUE, sep = "\t")
+
+# names need to be the same name as the gradient forest model
+future1  <- rename(future1, wc2.1_30s_bio_18 = bio18, 
+                   wc2.1_30s_bio_8 = bio8,
+                   wc2.1_30s_bio_7 = bio7,
+                   wc2.1_30s_bio_2 = bio2)
+
+# not chill climate scenario
+future2 <- read.table("env-variables/LOSH.top4env.50kb.random.sites.ssp585.pred.txt", header = TRUE, sep = "\t")
+
+future2  <- rename(future2, wc2.1_30s_bio_18 = bio18, 
+                   wc2.1_30s_bio_8 = bio8,
+                   wc2.1_30s_bio_7 = bio7,
+                   wc2.1_30s_bio_2 = bio2)
+head(future1)
+head(future2)
+
+
+# predict future allele frequencies for ssp126 and ssp585 scenarios
+futuregrid <- cbind(future1[, c("long", "lat")],
+                      predict(gradientforest_model, future1[, pred]))
+
+futuregrid2 <- cbind(future2[, c("long", "lat")],
+                      predict(gradientforest_model, future2[, pred]))
+
+```
+
+```{r}
+coords<-birdgrid[,c("long","lat")]
+euc <- matrix(data=NA,nrow=nrow(futuregrid),ncol=3)
+for(j in 1:nrow(currentgrid)) {
+  euc[j,] <- c(as.numeric(coords[j,]),as.numeric(dist(rbind(currentgrid[j,],futuregrid[j,]))))
+}
+euc <- data.frame(euc)
+names(euc) <- c("Long","Lat","Vulnerability")
+```
+
+```{r}
+library(RColorBrewer)
+colramp2=(brewer.pal(n = 9, name = "RdYlBu")[c(1:9)])
+Futcolors<-colorRampPalette(colramp2)
+
+class(euc)
+euc_sp<-st_as_sf(euc,coords=c("Long", "Lat"))
+st_crs(euc_sp) <- st_crs(coast_cropped) 
+mapg <- ggplot() +
+  geom_sf(data = coast_cropped) +
+  geom_sf(data = countries_cropped, fill = NA) +
+  geom_sf(data = states_cropped, fill = NA) +
+  geom_point(data=euc,aes(x=Long,y=Lat,color=Vulnerability),pch=15) +
+  scale_colour_gradientn(colours = Futcolors(100))+
+  geom_sf(data=loshmap,fill=NA) +
+  theme_bw() 
+
+mapg
+```
+
+
+
+```{r}
+coords<-birdgrid[,c("long","lat")]
+euc2 <- matrix(data=NA,nrow=nrow(futuregrid2),ncol=3)
+for(j in 1:nrow(currentgrid)) {
+  euc2[j,] <- c(as.numeric(coords[j,]),as.numeric(dist(rbind(currentgrid[j,],futuregrid2[j,]))))
+}
+euc2 <- data.frame(euc2)
+names(euc2) <- c("Long","Lat","Vulnerability")
+```
+
+```{r, fig.cap = "Heat map of genomic vulnerability under the 2050 8.5 emission future prediction"}
+euc_sp2<-st_as_sf(euc2,coords=c("Long", "Lat"))
+st_crs(euc_sp2) <- st_crs(coast_cropped) 
+mapg2 <- ggplot() +
+  geom_sf(data = coast_cropped) +
+  geom_sf(data = countries_cropped, fill = NA) +
+  geom_sf(data = states_cropped, fill = NA) +
+  geom_point(data=euc2,aes(x=Long,y=Lat,color=Vulnerability),pch=15) +
+  scale_colour_gradientn(colours = Futcolors(100))+
+  geom_sf(data=breeding_range,fill=NA) +
+  theme_bw() 
+
+mapg2
+```
+```{r}
+
+###play
+
+#worldclim_losb <- env rasters stacked, cropped, and masked to breeding range
+
+wc_df <- as.data.frame(worldclim_loshb, xy = TRUE, na.rm = TRUE)
+
+gradientforest_model <- read_rds("/Users/holdenfox/Downloads/losh.hii.clim.lc1k.GF_results.50kb_A.rds")
+
+current <- predict(gradientforest_model, wc_df[, c("wc2.1_30s_bio_18", "wc2.1_30s_bio_8", "wc2.1_30s_bio_7", "wc2.1_30s_bio_2")])
+
+current_df <- cbind(wc_df[, c("x", "y")], Vulnerability = current)
+
+current_rast <- rast(current_df, type = "xyz", crs = crs(worldclim_loshb))
+
+
+plot(current_rast)
+######
+
+library(terra)
+library(gstat)
+
+euc_pts <- vect(euc, geom = c("Long", "Lat"), crs = "EPSG:4326")
+
+res <- 0.1  # degrees — change based on your data density
+
+grid <- terra::rast(ext(euc_pts), resolution = res, crs = "EPSG:4326")
+grid <- terra::as.points(grid)
+grid_small <- grid[seq(1, nrow(grid), by = 10), ]
+
+euc_sf <- st_as_sf(euc, coords = c("Long", "Lat"), crs = 4326)
+
+## use 5070 for speed
+crs_proj <- 5070  # EPSG for North America Albers
+euc_proj <- st_transform(euc_sf, crs_proj)
+grid_proj <- st_transform(st_as_sf(grid_small), crs_proj)
+
+# Fit a variogram and kriging model
+v <- variogram(Vulnerability ~ 1, euc_sf)
+model <- fit.variogram(v, vgm("Exp"))
+
+# Kriging to the grid
+
+kriged <- krige(Vulnerability ~ 1, euc_sf, newdata = st_as_sf(grid), model = model)
+# use idw
+kriged_idw <- idw(Vulnerability ~ 1, euc_proj, newdata = grid_proj)
+
+
+euc_vect <- vect(kriged_idw)
+
+# Define the resolution (cell size) of the output raster
+res_value <- 0.27  # Adjust the resolution as necessary
+
+# Create a reference raster with the desired resolution and extent
+# Use the extent of the vector and apply the resolution
+r_ref <- rast(ext(euc_vect), resolution = res_value)
+
+r <- rasterize(euc_vect, r_ref, field = "var1.pred")
+
+
+
+
+
+
+
+
+
+
+
+
+
+breeding_range <- st_read("../meta/logshr_range_2022/logshr_range_2022.gpkg") %>% filter(season == "breeding")
+
+# Create SpatRaster from points
+euc_rast <- rast(euc, type = "xyz")
+plot(euc_rast)
+plot(euc_rast_smooth)
+
+# Interpolate to create a smooth raster (optional)
+euc_rast_smooth <- focal(euc_rast, w = 3, fun = mean, na.policy = "omit")
+
+# Convert raster to data frame for ggplot
+euc_df <- as.data.frame(euc_rast_smooth, xy = TRUE)
+names(euc_df) <- c("Long", "Lat", "Vulnerability")
+
+# Plot
+ggplot() +
+  geom_sf(data = coast_cropped) +
+  geom_sf(data = countries_cropped, fill = NA) +
+  geom_sf(data = states_cropped, fill = NA) +
+  geom_raster(data = euc_df, aes(x = Long, y = Lat, fill = Vulnerability)) +
+  scale_fill_gradientn(colours = Futcolors(100)) +
+  geom_sf(data = breeding_range, fill = NA) +
+  theme_bw()
+```

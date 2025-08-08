@@ -1,0 +1,630 @@
+---
+title: "Prep Enviornmental Variables"
+author: "Holden"
+date: "2024-11-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# run in console
+#setwd("gea/env-variables/")
+```
+
+Libraries
+```{r}
+library(sp)
+library(terra)
+library(tidyverse)
+library(sf)
+#devtools:::install_github("gearslaboratory/gdalUtils") # Install gdalUtils from GitHub
+#library(gdalUtils)
+#library(rgdal)
+```
+
+
+```{r}
+# Set working directory to the location containing the bioclimatic rasters
+setwd("wc2.1_30s_bio")
+list.files()
+```
+Load worldclim rasters
+```{r}
+setwd("wc2.1_30s_bio")
+files<-list.files()
+files_sorted <- files[order(as.numeric(sub(".*_([0-9]+)\\.tif", "\\1", files)))]
+
+for (i in 1:length(files_sorted)) {
+  # Generate variable names: bio1, bio2, ...
+  var_name <- paste("bio", i, sep = "")
+  
+  # Read in the raster
+  assign(var_name, terra::rast(files_sorted[i]))
+  
+  # Print the variable name and the raster object to verify
+  print(paste(var_name, "loaded", files_sorted[i]))
+}
+```
+
+
+
+```{r}
+# create raster stack
+worldclim_terra <- c(bio1, bio2, bio3, bio4, bio5, bio6, bio7, bio8, bio9, bio10, bio11, bio12, bio13, bio14, bio15, bio16, bio17, bio18, bio19)
+
+# Load individual and metadata files, filter for relevant IDs and locations
+ind <- read_delim("../sample_list_269.txt", delim = "/t", col_names = FALSE) %>% rename(BGP_ID = X1)
+
+meta <- read.csv("../../pca/Apr-25/data/LOSH Master - Library Master.csv") %>%
+  filter(BGP_ID %in% ind$BGP_ID) %>%
+  dplyr::select(-c(Picogreen_ng_ul, BandQuality, ReRunPlateName, ReRunPlatePosition, LibraryPlateName, LibraryPlatePosition, FullLibraryName, Notes)) %>%
+  mutate(CityTown = if_else(CityTown == "Los Angeles", "Los Angeles, San Clemente Island", CityTown)) %>% 
+  distinct() %>% 
+   mutate(
+    Lat = if_else(BGP_ID == "22N13856", 37.1057, Lat),
+    Long = if_else(BGP_ID == "22N13856", -80.6853, Long)
+  )
+
+# make an sf object
+coords <- st_as_sf(meta, coords = c('Long', 'Lat')) %>%
+  st_set_crs(4326) %>%
+  sf::st_transform(crs = 4326)
+
+pts_ext <- st_bbox(coords)
+
+# Define buffer in degrees (e.g., ~1 degree ~111 km)
+buffer_deg <- 1
+
+# Create buffered extent
+buff_ext <- terra::ext(
+  pts_ext["xmin"] - buffer_deg,
+  pts_ext["xmax"] + buffer_deg,
+  pts_ext["ymin"] - buffer_deg,
+  pts_ext["ymax"] + buffer_deg
+)
+
+worldclim_terra_cropped <- terra::crop(worldclim_terra, buff_ext)
+
+# check to see if your raster and coordinates have the same projection
+crs(worldclim_terra_cropped) == crs(coords)
+
+# they do that is wonderful. No need to reproject at this time.
+#worldclim_proj <- terra::project(worldclim_terra_cropped, crs(coord2))
+
+# plot to make sure they points fit inside the raster
+plot(worldclim_terra_cropped[[1]])
+plot(st_geometry(coords), add=TRUE, col="red", pch=2)
+
+worldclim_ext <- terra::extract(worldclim_terra_cropped, coords, fun = mean) # fun mean only necessary if projection has created overlapping cells
+
+## save worldclim
+cbind(meta, worldclim_ext) %>%
+  filter(BGP_ID %in% ind$BGP_ID) %>%
+  write.table("LOSH.269ind.34pop.worldclim.txt",
+              row.names = FALSE, quote = FALSE, sep = "\t")
+```
+Old stuff
+```{r}
+# Create random sites within Willow Flycatcher breeding range
+# library(fs)
+# library(tidyverse)
+# library(sf)
+
+# Load breeding range shapefiles for Rosy Finch
+# shapefiles <- '~/Dropbox/BGP/genoscape_maps/shapefiles/ROFI_eBird/' %>%
+#   dir_ls(recurse = TRUE, regexp = 'gpkg$') # List GPKG files recursively
+# sfdf <- shapefiles %>%
+#   map(st_read) %>%
+#   bind_rows() %>%
+#   filter(season == "breeding") # Filter for breeding season polygons
+
+# Visualize breeding range polygons
+# ggplot(sfdf) +
+#   geom_sf(fill = NA) +
+#   theme_bw()
+
+# Limit climate variables to the breeding range of Rosy Finch
+# bioclim_proj <- terra::project(bioclim_terra_top, crs(sfdf))
+# bioclimw <- crop(bioclim_proj, sfdf) # Crop raster to breeding range
+# bioclimrofi <- mask(bioclimw, sfdf) # Mask raster to breeding range
+
+# Generate random sample points within the breeding range
+# randomsitesP <- spatSample(bioclimrofi, size = 50000, method = "random",
+#                            replace = FALSE, na.rm = TRUE, as.df = TRUE, xy = TRUE)
+# names(randomsitesP) <- c("long", "lat", "msp", "ppt_sm", "ppt_wt", "rh", "shm", "td")
+
+# Extract snowpack data for random sites
+# coord2 <- st_as_sf(randomsitesP, coords = c('long', 'lat')) %>%
+#   st_set_crs(4326) %>%
+#   sf::st_transform(crs = 4326)
+# snowpack_terra_proj <- terra::project(snowpack_terra_top, crs(coord2))
+# snowpack_rofi_terra <- terra::extract(snowpack_terra_proj, coord2, fun = mean)
+
+# Combine and calculate average snowpack values for random sites
+# sp <- cbind(coord2, snowpack_rofi_terra) %>%
+#   mutate(ave_july_snowpack = (Jul2022 + Jul2023 + Jul2024) / 3) %>%
+#   dplyr::select(-ID) # Remove ID column
+
+# Save the final random site data
+# write.table(sp, "~/Dropbox/BGP/ROFI/environment/ROFI.RandomSites.txt",
+#             row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+Load HII north america.tif
+```{r}
+hii <- terra::rast("HumanInfluenceTerrestrialEcosystems_TIF/HumanInfluenceTerrestrial/data/NA_Human_Influence_Index.tif")
+
+# coords <- st_as_sf(meta, coords = c('Long', 'Lat')) %>%
+#   st_set_crs(4326) %>%
+#   sf::st_transform(crs = 4326)
+
+#crs(hii) == crs(coords)
+
+if (st_crs(coords) != st_crs(hii)) {
+  coords <- st_transform(coords, crs = st_crs(hii))
+}
+
+# dont reproject the raster that is too time consuming and expensive
+#hii_proj <- terra::project(hii, crs(coords))
+
+pts_ext <- st_bbox(coords)
+
+# Define buffer meters?
+buffer_deg <- 111111
+
+# Create buffered extent
+buff_ext <- terra::ext(
+  pts_ext["xmin"] - buffer_deg,
+  pts_ext["xmax"] + buffer_deg,
+  pts_ext["ymin"] - buffer_deg,
+  pts_ext["ymax"] + buffer_deg
+)
+
+# mainly for plotting
+hii_cropped <- terra::crop(hii, buff_ext)
+
+plot(hii_cropped)
+plot(st_geometry(coords), add=TRUE, col="red", pch=2)
+
+hii_ext <- terra::extract(hii_cropped, coords)
+
+cbind(meta, hii_ext) %>%
+  filter(BGP_ID %in% ind$BGP_ID) %>%
+  write.table("LOSH.269ind.34pop.hii.txt",
+              row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+### NDVI
+load ndvi max & min
+```{r}
+# from sharepoint
+ndvi.max <- terra::rast("/Users/holdenfox/Desktop/landscape-ecology/lab9/NDVI/ndvimax.tif")
+ndvi.sd <- terra::rast("/Users/holdenfox/Desktop/landscape-ecology/lab9/NDVI/ndvistd.tif")
+
+coords <- st_as_sf(meta, coords = c('Long', 'Lat')) %>%
+  st_set_crs(4326) %>%
+  sf::st_transform(crs = 4326)
+
+crs(ndvi.max) == crs(coords)
+crs(ndvi.sd) == crs(coords)
+
+ndvi.max_ext <- terra::extract(ndvi.max, coords)
+ndvi.sd_ext <- terra::extract(ndvi.sd, coords)
+
+#always a good check
+meta$BGP_ID == coords$BGP_ID
+
+cbind(meta, ndvi.max_ext) %>%
+  filter(BGP_ID %in% ind$BGP_ID) %>%
+  write.table("LOSH.269ind.34pop.ndvi.max.txt",
+              row.names = FALSE, quote = FALSE, sep = "\t")
+
+cbind(meta, ndvi.sd_ext) %>%
+  filter(BGP_ID %in% ind$BGP_ID) %>%
+  write.table("LOSH.269ind.34pop.ndvi.sd.txt",
+              row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+# NA Landcover
+```{r}
+landcover <- terra::rast("land_cover_2020v2_30m_tif/NA_NALCMS_landcover_2020v2_30m/data/NA_NALCMS_landcover_2020v2_30m.tif")
+
+coords <- st_as_sf(meta, coords = c('Long', 'Lat')) %>%
+  st_set_crs(4326) %>%
+  sf::st_transform(crs = 4326)
+
+if (st_crs(coords) != st_crs(landcover)) {
+  coords <- st_transform(coords, crs = st_crs(landcover))
+}
+
+crs(landcover) == crs(coords)
+
+# transform points to crs of landcover
+#coords_transformed <- st_transform(coords, crs = st_crs(landcover))
+
+# get furthest extent of points
+coords_bbox <- st_bbox(coords)
+coords_bbox_sf <- st_as_sfc(coords_bbox)
+# define 20km further than points
+coords_buffered <- st_buffer(coords_bbox_sf, dist = 20000)
+# crop to 20km further than points
+landcover_cropped <- crop(landcover, coords_buffered)
+
+landcover_ext <- terra::extract(landcover_cropped, coords_transformed)
+
+## take a look
+head(landcover_ext)
+```
+
+As you might expect for landcover type data, the value extracted for each point is the class/type of landcover at that lat-long. 
+```
+> head(landcover_ext)
+  ID           Class_EN
+1  1           Cropland
+2  2           Cropland
+3  3               <NA>
+4  4 Urban and Built-up
+5  5 Urban and Built-up
+6  6 Urban and Built-up
+```
+Marina used these landcover data in her yellow warbler GEAs. I want to create a 1km diameter buffer around each point (roughly the home range of ea shrike, extract the landcover class for ea pixel in the area, and calculate a percent landcover for each type. This is roughly what Kelly did for burrowing owls.
+
+Will also mentioned that I might consider a weighted average when calculating the percent land cover at each point, such that landcover type closer to the center of the buffer will be weighted more heavily than landcover type closer to the edge of the buffer.
+
+## notes 
+The 0.5 km radius should ideally be supported by species-specific data, such as known dispersal distances or average home range sizes. If such data isn't available, a sensitivity analysis with different radii might be useful.
+
+```{r}
+## first two lines stolen from gradient-forest-LOSH.Rmd see for how to make the pop file.
+pops <- read.table(file = "../sample_list_34pop.tsv", sep="\t", header = FALSE) %>% rename(FID = V1, IID = V2, Group = V3)
+
+climgroups <- pops %>% dplyr::select(IID, Group) %>% rename(BGP_ID = IID, ClimGroup = Group)
+
+coords <- coords %>% left_join(climgroups, by = "BGP_ID")
+
+# Create 10 km radius buffers
+coords_sv <- vect(coords) # must be spat vector for buffer function.
+buffers <- terra::buffer(coords_sv, width = 1000) # radius is in meters
+
+## to avoid resampling cells in overlapping buffers, we want to smush the buffers together
+
+buffers_ag <- terra::aggregate(buffers, by = "ClimGroup", dissolve=T) ## aggregate by climgroup so that you can take avg land cover per clim group...
+
+# plot them. looks solid. 
+plot(landcover_cropped)
+plot(buffers_ag, add = TRUE, border = "black", lwd = 2)
+
+climgroups.buffer.order <- as.data.frame(buffers_ag) %>% dplyr::select(ClimGroup)
+
+extracted <- terra::extract(landcover_cropped, buffers_ag, cells = T, df = T, ID=T)
+
+extracted_filt <- extracted %>% filter(!is.na(Class_EN))
+
+percent_landcover <- extracted_filt %>% 
+  group_by(ID, Class_EN) %>%
+  tally() %>% 
+  mutate(percentage = n / sum(n) * 100) %>%
+  ungroup() %>% 
+  dplyr::select(-n)
+
+percent_landcover_wide <- percent_landcover %>%
+  pivot_wider(names_from = Class_EN, values_from = percentage, values_fill = list(percentage = 0))
+
+## as far as I and claude.ai can tell, terra::extract() preserves the order of ClimGroups in the input (buffers_ag), cbinding them back in should work ok. Could also use mutate I imagine.
+
+cbind(climgroups.buffer.order, percent_landcover_wide) %>% 
+  dplyr::select(-ID) %>% 
+  write.table("LOSH.267ind.33pop.perclandcover.1kmradius.txt", row.names = FALSE, quote = FALSE, sep = "\t") 
+##I've been naming these 267ind, but I am pretty sure my 33 pops/climgroups have 267 so I am changing the naming scheme here. You'll probably want to update the rest of the gradient forest files also...
+```
+
+For easy viewing, just show percent landcover of the proportionally largest data type for each point.
+```{r}
+dominant_land_cover <- percent_landcover %>%
+  group_by(ID) %>%
+  slice_max(percentage, n = 1, with_ties = FALSE)
+```
+
+Let's plot the buffers. Color climate grouped buffers by percent mixed forest. On top of the landcover raster
+```{r}
+# First get percent Mixed Forest per ClimGroup
+cropland_by_group <- percent_cropland_wide %>%
+  bind_cols(climgroups.buffer.order) %>%  # add back ClimGroup info
+  dplyr::select(ClimGroup, `Mixed Forest`) # select just the columns we need
+
+# Add these percentages to the buffers_ag object
+buffers$mixed_forest_percent <- mixed_forest_by_group$`Mixed Forest`
+
+
+# Load necessary libraries
+library(ggplot2)
+library(rnaturalearth)
+library(sf)
+library(viridis)
+library(plotly)
+
+# Get the North America map
+north_america <- ne_countries(continent = "North America", returnclass = "sf")
+north_america <- rnaturalearth::ne_states(country = c("United States of America", "Canada", "Mexico"), returnclass = 'sf') %>% st_transform(north_america, crs = st_crs(buffers_ag))
+
+shrike_range <- st_read("../../meta/logshr_range_2022/logshr_range_2022.gpkg") %>% filter(season == "breeding")
+
+buffers_sf <- sf::st_as_sf(buffers)
+
+# Plot using ggplot2
+ggplot() +
+  geom_sf(data = north_america, fill = "lightgray", color = "black") +
+  geom_sf(data = buffers_sf, aes(fill = mixed_forest_percent), color = NA, alpha = 0.9, size = 10) +
+  scale_fill_viridis(name = "Mixed Forest %", option = "viridis") +
+  labs(title = "Mixed Forest Percentage by ClimGroup (North America)") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+# make plots for landscape ecology talk
+```{r}
+bio18_cropped <- crop(bio18, domain)
+bio18_cropped_df <- as.data.frame(bio18_cropped, xy = T)
+head(bio18_cropped_df)
+
+pdf("bio18_cropped.pdf")
+plot(bio18_cropped)
+#points(coords)
+dev.off()
+
+bio8_cropped <- crop(bio8, domain)
+pdf("bio8_cropped.pdf")
+plot(bio8_cropped)
+dev.off()
+
+bio7_cropped <- crop(bio7, domain)
+pdf("bio7_cropped.pdf")
+plot(bio7_cropped)
+dev.off()
+
+bio2_cropped <- crop(bio2, domain)
+pdf("bio2_cropped.pdf")
+plot(bio2_cropped)
+dev.off()
+
+bio15_cropped <- crop(bio2, domain)
+pdf("bio15_cropped.pdf")
+plot(bio15_cropped)
+dev.off()
+
+bio3_cropped <- crop(bio2, domain)
+pdf("bio3_cropped.pdf")
+plot(bio3_cropped)
+dev.off()
+
+hii_cropped <- crop(hii_proj, domain)
+pdf("hii.pdf")
+plot(hiii_cropped)
+dev.off()
+
+ndvi.max_cropped <- crop(ndvi.max, domain)
+pdf("ndvimax.pdf")
+plot(ndvi.max_cropped)
+dev.off()
+
+ndvi.sd_cropped <- crop(ndvi.sd, domain)
+pdf("ndvisd.pdf")
+plot(ndvi.sd_cropped)
+dev.off()
+
+landcover <- terra::rast("land_cover_2020v2_30m_tif/NA_NALCMS_landcover_2020v2_30m/data/NA_NALCMS_landcover_2020v2_30m.tif")
+plot(landcover)
+
+coords_or <- coords %>% filter(State == "OR")
+
+# transform points to crs of landcover
+coords_transformed <- st_transform(coords_or, crs = st_crs(landcover))
+# get furthest extent of points
+coords_bbox <- st_bbox(coords_transformed)
+coords_bbox_sf <- st_as_sfc(coords_bbox)
+# define 20km further than points
+coords_buffered <- st_buffer(coords_bbox_sf, dist = 20000)
+# crop to 20km further than points
+landcover_cropped <- crop(landcover, coords_buffered)
+
+pops <- read.table(file = "../losh.33pop.txt", sep="\t", header = FALSE) %>% rename(FID = V1, IID = V2, Group = V3)
+climgroups <- pops %>% dplyr::select(IID, Group) %>% rename(BGP_ID = IID, ClimGroup = Group)
+coords_transformed <- coords_transformed %>% left_join(climgroups, by = "BGP_ID")
+
+coords_transformed_vect <- vect(coords_transformed)
+buffers <- terra::buffer(coords_transformed_vect, width = 2000) # radius is in 
+buffers_ag <- terra::aggregate(buffers, by = "ClimGroup", dissolve=T) 
+
+pdf("burns_landcover.pdf")
+plot(landcover_cropped)
+#plot(buffers_ag, add = TRUE, border = "black", lwd = 2)
+dev.off()
+
+```
+
+# Create Random Sites for LOSH breeding ranged
+```{r}
+library(sf)
+library(tidyverse)
+```
+
+# get losh breeding range sf and plot 
+```{r}
+losh_breeding <- read_sf("../../genoscape_maps/shapefiles/LOSH/logshr_range_2021.gpkg") %>% filter(season == "breeding")
+crs(losh_breeding)
+ggplot(losh_breeding) +
+  geom_sf(fill=NA) +
+  theme_bw()
+
+```
+  
+## Limit the Climate variables to JUST the breeding range of Rosy Finch
+bioclim_proj <- terra::project(bioclim_terra_top, crs(sfdf))
+
+## create raster stack of top 4 climate variables from intial gf
+```{r}
+worldclim_top4 <- c(bio18, bio8, bio7, bio2)
+crs(worldclim_top4)
+```
+
+Our raster stack and breeding range both have crs WGS84, nice!
+
+## choose random sites
+```{r}
+#using 50k points here. Caitlin used 100k
+worldclim_loshb <- crop(worldclim_top4, losh_breeding)
+worldclim_loshb <- mask(worldclim_loshb, losh_breeding)
+
+set.seed(16)
+randomsites<-spatSample(worldclim_loshb, size=50000, method="random", replace=FALSE, na.rm=TRUE, as.df=TRUE,xy=TRUE)
+head(randomsites)
+names(randomsites)<-c("long","lat","bio18","bio8", "bio7", "bio2")
+dim(randomsites)
+
+summary(randomsites)
+summary(ssp126_randomsites)
+summary(ssp585_randomsites)
+
+```
+
+
+```{r}
+write.table(randomsites, "LOSH.top4env.50kb.random.sites.txt",
+            row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+#### Future climate predictions:
+To predict expected allele frequencies in 2061–2080 using the
+predicted environmental raster values for the years 2061–2080
+under Shared-Socioeconomic Pathways 126 and 585 (SSP126
+and SSP585) at 100,000 random points throughout the breeding range. We chose SSP126 and SSP585 as representative of
+the lowest and highest warming scenarios (Hausfather, 2019) as
+predicted from the Coupled Model Intercomparison Projects
+
+Which GCM to use? No great information on this. Ask CH. for now use the US Department of Energy Model...
+
+```{r}
+# load projected climate
+library(terra)
+ssp126 <- rast("future_clim_predictions/wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080.tif")
+# coord2 <- st_as_sf(meta, coords = c('Long', 'Lat')) %>%
+#   st_set_crs(4326) %>%
+#   sf::st_transform(crs = 4326)
+crs(ssp126)
+crs(coord2) 
+## they are the same it seems so no need to reproject...
+
+# define losh_breeding as above
+losh_breeding <- read_sf("../../genoscape_maps/shapefiles/LOSH/logshr_range_2021.gpkg") %>% filter(season == "breeding") %>% st_set_crs(st_crs(4326))
+
+# crop and mask
+ssp126_loshb <- crop(ssp126, losh_breeding)
+ssp126_loshb <- mask(ssp126_loshb, losh_breeding)
+
+# Define the selected bioclim variables
+selected_vars <- c("wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_18", # bio18
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_8", # bio8
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_7", # bio7
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_2") # bio2
+
+# Subset the raster to only these variables
+ssp126_loshb <- ssp126_loshb[[selected_vars]]
+
+set.seed(16)
+ssp126_randomsites<-spatSample(ssp126_loshb, size=50000, method="random", replace=FALSE, na.rm=TRUE, as.df=TRUE,xy=TRUE)
+head(ssp126_randomsites)
+
+names(ssp126_randomsites)<-c("long","lat","bio18","bio8", "bio7", "bio2")
+head(ssp126_randomsites)
+dim(ssp126_randomsites)
+
+write.table(ssp126_randomsites, "LOSH.top4env.50kb.random.sites.ssp126.pred.txt",
+            row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+#### redo
+```{r}
+# Load projected climate
+ssp126 <- rast("future_clim_predictions/wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080.tif")
+# Crop and mask with the breeding range shapefile
+ssp126_loshb <- crop(ssp126, losh_breeding)
+ssp126_loshb <- mask(ssp126_loshb, losh_breeding)
+
+# Define the selected bioclim variables for SSP126
+selected_vars <- c("wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_18", # bio18
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_8", # bio8
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_7", # bio7
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp126_2061-2080_2") # bio2
+
+# Subset the raster to only these variables
+ssp126_loshb <- ssp126_loshb[[selected_vars]]
+
+# Generate random sites
+set.seed(16)
+ssp126_randomsites <- spatSample(ssp126_loshb, size = 50000, method = "random", replace = FALSE, na.rm = TRUE, as.df = TRUE, xy = TRUE)
+
+# Rename columns and save the output
+names(ssp126_randomsites) <- c("long", "lat", "bio18", "bio8", "bio7", "bio2")
+write.table(ssp126_randomsites, "LOSH.top4env.50kb.random.sites.ssp126.pred.txt",
+            row.names = FALSE, quote = FALSE, sep = "\t")
+
+```
+
+
+
+# do the same for 
+```{r}
+# load worse case clim scenario predictions
+ssp585 <- rast("future_clim_predictions/wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080.tif")
+# crop and mask
+ssp585_loshb <- crop(ssp585, losh_breeding)
+ssp585_loshb <- mask(ssp585_loshb, losh_breeding)
+
+# Define the selected bioclim variables
+selected_vars <- c("wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_18", # bio18
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_8", # bio8
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_7", # bio7
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_2") # bio2
+
+# Subset the raster to only these variables
+ssp585_loshb <- ssp585_loshb[[selected_vars]]
+set.seed(16)
+ssp585_randomsites<-spatSample(ssp585_loshb, size=50000, method="random", replace=FALSE, na.rm=TRUE, as.df=TRUE,xy=TRUE)
+head(ssp585_randomsites)
+names(ssp585_randomsites)<-c("long","lat","bio18","bio8", "bio7", "bio2")
+dim(ssp585_randomsites)
+
+write.table(ssp126_randomsites, "LOSH.top4env.50kb.random.sites.ssp585.pred.txt",
+            row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+### redo
+```{r}
+# Load worst-case climate scenario predictions (SSP585)
+ssp585 <- rast("future_clim_predictions/wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080.tif")
+# Crop and mask with the breeding range shapefile
+ssp585_loshb <- crop(ssp585, losh_breeding)
+ssp585_loshb <- mask(ssp585_loshb, losh_breeding)
+
+# Define the selected bioclim variables for SSP585
+selected_vars <- c("wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_18", # bio18
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_8", # bio8
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_7", # bio7
+                   "wc2.1_30s_bioc_ACCESS-CM2_ssp585_2061-2080_2") # bio2
+
+# Subset the raster to only these variables
+ssp585_loshb <- ssp585_loshb[[selected_vars]]
+
+# Generate random sites
+set.seed(16)
+ssp585_randomsites <- spatSample(ssp585_loshb, size = 50000, method = "random", replace = FALSE, na.rm = TRUE, as.df = TRUE, xy = TRUE)
+
+# Rename columns and save the output
+names(ssp585_randomsites) <- c("long", "lat", "bio18", "bio8", "bio7", "bio2")
+write.table(ssp585_randomsites, "LOSH.top4env.50kb.random.sites.ssp585.pred.txt",
+            row.names = FALSE, quote = FALSE, sep = "\t")
+```
+
+
+
+
+
