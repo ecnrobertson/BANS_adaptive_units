@@ -1,0 +1,18 @@
+---
+title: "01.fastq_processing"
+output: html_document
+date: "2025-08-08"
+author: "Erica Robertson"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Getting the VCF
+So this is the initial file that CH put together. I'll add the new sequence data later but I'm going to work out the code now.
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/data/BANS.ds6x.pass-maf-0.05.SNP.above4x..maxmiss.8.recode.vcf.gz ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS
+```
+
