@@ -1,0 +1,753 @@
+---
+title: "RDA"
+author: "Erica Robertson"
+date: "2025-08-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/BANS/BANS_adaptive_units/")
+```
+
+```{r, label="packages"}
+library(pegas)
+library(ggplot2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(RColorBrewer)
+library(ggpubr)
+library(vegan)
+library(robust)
+library(ggVennDiagram)
+library(cowplot)
+library(corrplot)
+library(data.table)
+library(tidyverse)
+library(qvalue) <----
+library(adegenet)
+```
+
+
+# Reformatting vcf with PLINK
+```{bash}
+conda activate GWAS2
+plink -vcf ../data/BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.recode.vcf.gz --aec --recode A --out BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss
+```
+
+This generates the following files:
+BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.log
+BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.nosex
+BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.raw
+
+With the recode A function 
+-Each genotype is coded as 0, 1, or 2, representing the number of copies of the alternate (usually minor) allele an individual has at each SNP.
+-Missing genotypes are typically coded as -1.
+
+Recommended next step is to cut the header off the plink file before moving it into R, for downstream stuff to work.
+
+```{bash}
+cut -d$'\t' -f7- BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.raw > BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.raw_noheader.raw
+```
+
+# Loading data into R
+
+Now we need to get the allele frequency and environmental data into R. This isn't going to run well on your local computer unless you only have a small subset of SNPs. A good way to do this is sample your vcf and move over a subset to test the scripts on your local machine, and then pop them back over to the cluster when they're ready to run on the full set.
+
+```{bash, label="subsample_vcf"}
+#subset the vcf
+bcftools view -H BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.recode.vcf.gz | shuf -n 10000 > snplist.txt
+bcftools view -R snplist.txt BANS.ds6x.pass-maf-0.05.SNP.above4x.nomiss.recode.vcf.gz -o subsampled.vcf
+#rerun plink
+conda activate GWAS2
+plink -vcf ../data/subsampled.vcf --aec --recode A --out subsampled
+#recut header
+cut -d$'\t' -f7- subsampled.raw > subsampled_noheader.raw
+```
+
+Alright, move that over to your local computer.
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/subsampled_noheader.raw /Users/ericarobertson/Desktop/BANS_adaptive_units/data/
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.imputation/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.fam /Users/ericarobertson/Desktop/BANS_adaptive_units/data/
+```
+
+```{r}
+pops <- read.table(file = "BANS_sample_list_pop.tsv", sep="\t", header = FALSE) %>% rename(BGP_ID = V1, Pop = V3) %>% dplyr::select(BGP_ID, Pop)
+
+#all.freq <- fread("data/losh.33pop.frq.strat.50k_A.txt") ## instead of running on allele frequency per population, try running on individual genotypes...
+
+genotypes <- fread("/Users/ericarobertson/Desktop/BANS_adaptive_units/data/subsampled_noheader.raw")
+
+
+indorder <- fread("../../data/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.fam") %>% rename(BGP_ID = V1) %>% dplyr::select(BGP_ID)
+
+env <- read_delim("../../data/spatial_files/BANS.initial.worldclim.txt", delim = "\t")
+
+env <- left_join(indorder, env, by = "BGP_ID")
+
+env$BGP_ID == indorder$BGP_ID
+
+env %>% select(-"BGP_ID") %>% write.table("BANS.climtop6.txt", row.names = F, quote = F, sep = "\t")
+
+env %>% select(-"BGP_ID", bio18, bio8, bio7, bio2) %>% write.table("data/LOSH.264.ind.33pop.climtop4.txt", row.names = F, quote = F, sep = "\t")
+
+
+#
+
+## read this in in the rda.R script
+env2 <- fread("data/LOSH.264.ind.33pop.climtop6.txt", sep = "\t")
+
+
+
+```
+
+```{r}
+# source("./src/rdadapt.R")
+# rdadapt_env_unconstrained <- rdadapt(RDA_env_unconstrained, 2)
+# thres_env <- 0.01/length(rdadapt_env_unconstrained$p.values)
+# 
+# 
+# ## Identifying the outliers for the simple RDA
+# outliers_unconstrained <- data.frame(Loci = colnames(all.freq)[which(rdadapt_env_unconstrained$p.values<thres_env)], p.value = rdadapt_env_unconstrained$p.values[which(rdadapt_env_unconstrained$p.values<thres_env)], contig = unlist(lapply(strsplit(colnames(all.freq)[which(rdadapt_env_unconstrained$p.values<thres_env)], split = "_"), function(x) x[1])))
+# outliers_unconstrained <- outliers_unconstrained[order(outliers_unconstrained$contig, outliers_unconstrained$p.value),]
+# outliers_rdadapt_env_unconstrained <- as.character(outliers_unconstrained$Loci[!duplicated(outliers_unconstrained$contig)])
+```
+
+###plink pca
+```
+plink --bfile pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid --pca 10 header --out pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid --aec 
+```
+```{r}
+# load required libraries
+library(adespatial) # for spatial eigenfunction analysis like dbMEM
+library(sf) # for handling spatial features (coordinates, projections, etc.)
+library(vegan) # for multivariate analysis (e.g., RDA, PCA, variable selection)
+library(data.table)
+
+indorder <- fread("data/pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid.fam") %>% rename(BGP_ID = V1) %>% dplyr::select(BGP_ID)
+
+# read in plink pca
+plink_pca <- read.table("/Users/holdenfox/Downloads/pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid.eigenvec", header = TRUE)
+
+# clean and rename: drop 'FID' and rename 'IID' to 'BGP_ID' to match other metadata
+plink_pca <- plink_pca %>% dplyr::select(-FID) %>% rename(BGP_ID = IID)
+
+## mems
+# read in coordinates from metadata file and filter for individuals in indorder
+coords <- read_csv("../../meta/losh_master_092924.csv") %>%
+  filter(BGP_ID %in% indorder$BGP_ID) %>% 
+  dplyr::select(BGP_ID, Long, Lat)
+
+# reorder coordinates to match PCA data
+coords <- coords[(match(indorder$BGP_ID, coords$BGP_ID)),]
+
+coords_sf <- st_as_sf(coords, coords = c("Long", "Lat"), crs = 4326)
+
+gd <- geosphere::distm(as(coords_sf, "Spatial"), fun = geosphere::distHaversine)
+dist <- as.dist(gd)
+
+# generate moran's eigenvector maps (MEMs) based on coordinates
+mem <- adespatial::dbmem(dist, MEM.autocor = "all")
+
+#moran_test <- moran.randtest(mem)
+
+# rda to assess how much MEMs explain genetic variation (PC1–PC3)
+mem_rda <- vegan::rda(plink_pca[,c("PC1", "PC2", "PC3")] ~ ., as.data.frame(mem[,1:10]))
+summary(mem_rda)
+
+# create a null (intercept-only) rda model as a baseline
+mem_rda_full <- vegan::rda(plink_pca[,c("PC1", "PC2", "PC3")] ~ 1, as.data.frame(mem[,1:10]))
+
+# stepwise forward selection of mem variables based on adjusted R-square and significance
+selmem <- vegan::ordiR2step(mem_rda_full, mem_rda, Pin = .01)
+summary(selmem)
+# extract the names of the selected mem variables
+selmem <- names(selmem$terminfo$ordered)
+
+# subset the mem matrix to include only the mems that explain population structure
+mem_popstr <- mem[,selmem]
+
+#saveRDS(mem_popstr, file = "data/losh.mems.popstr.rds")
+
+```
+
+
+```{r}
+coords_mems_pc <- cbind(coords, mem, plink_pca[,c("PC1", "PC2", "PC3")])
+
+map <- rnaturalearth::ne_states(country = c("United States of America", "Canada", "Mexico"), returnclass = 'sf')
+# plot the populations you defined. use plotly to zoom around easy
+mem4_map<- ggplot(map) + geom_sf() + geom_point(data = coords_mems_pc, aes(x = Long, y = Lat, color = MEM4, BGP_ID = BGP_ID)) +
+coord_sf(xlim = c(-125, -70), ylim = c(23, 58)) + scale_color_viridis_c()
+ggsave("mem4_map.pdf", mem4_map, width = 8, height = 6)
+
+
+plot(coords_mems_pc[,c("PC1", "PC2", "PC3", paste0("MEM",1:9))])
+```
+
+One thing the paper that I saw in the paper recommending this did afterwards was select MEMs from the final set (selmem) which are uncorrelated with your selected environmental variables as well. You can do that like:
+```{r}
+corselmem <- cor(mem[,selmem], pred) # remove any correlated
+corselmem <- rownames(corselmem)[which(rowSums(abs(corselmem) >= 0.7) > 0)]
+uncorselmem <- mem[,selmem]
+uncorselmem <- as.data.frame(uncorselmem)[,-which(colnames(uncorselmem) %in% corselmem), drop = FALSE]
+#saveRDS(uncorselmem, file = "data/losh.mems.popstr.uncor.rds")
+```
+
+I got annoyed with trying to plot and so stats on all data so i'm going to do a subset of 10,000 snps like brenna does.
+```{r}
+library(data.table)
+library(adegenet)
+library(adegenet)
+
+# Load PLINK raw file as a genlight object
+# plink_data <- read.PLINK("data/pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid.raw")
+# # convert genlight object to a genotype matrix
+# geno_matrix <- as.matrix(plink_data)  # This extracts SNP genotypes
+# # get SNP names
+# snp_names <- colnames(geno_matrix)
+# # ensure there are enough SNPs to sample
+# num_snps_to_sample <- min(10000, length(snp_names)) ##there is
+# # randomly sample 10,000 SNPs (or fewer if there aren't that many)
+# set.seed(123)
+# selected_snps <- sample(snp_names, num_snps_to_sample)
+# # subset the genotype matrix
+# geno_subset <- geno_matrix[, selected_snps]
+# # convert back to a genlight object
+# plink_subset <- new("genlight", geno_subset)
+# # save the subsetted SNP data (as a CSV or other format)
+# write.table(as.data.frame(geno_subset), "subset_10000_snps.csv", sep = ",", quote = FALSE, row.names = TRUE)
+
+subset <- read.csv("~/Downloads/subset_10000_snps.csv")
+env <- fread("data/LOSH.264.ind.33pop.climtop6.txt")
+pop <- fread("../losh.33pop.txt", header = F) %>% dplyr::select(-V2) %>% rename(BGP_ID = V1, ClimGroup = V3)
+bgp_ids <- data.frame(BGP_ID = rownames(subset))
+pop <- pop %>% slice(match(bgp_ids$BGP_ID, pop$BGP_ID)) ## make ind same order as snpfile & env data
+env <- cbind(pop, env)
+
+##modify data types like brenna did...
+
+# Convert BGP_ID to character (to avoid factor-related issues)
+env[, BGP_ID := as.character(BGP_ID)]
+
+# Convert ClimGroup to a factor if it's categorical
+env[, ClimGroup := as.factor(ClimGroup)]
+
+# Convert bio2 to numeric (to match bio18, bio8, bio7)
+env[, bio2 := as.numeric(bio2)]
+
+#reordering?
+# env[, BGP_ID := as.character(BGP_ID)]
+# rownames(subset) <- as.character(rownames(subset))
+# 
+# env <- env[match(rownames(subset), env$BGP_ID), ]
+
+all(rownames(subset) == env$BGP_ID)
+
+pred <- subset(env, select=c(bio18, bio8, bio7, bio2, bio15, bio3))
+
+pred_mems <- cbind(pred, as.data.frame(mem_popstr))
+
+pred_pc <- cbind(pred, plink_pca %>% dplyr::select(PC1, PC2, PC3))
+
+losh.subset.ind.rda <- rda(subset ~ ., data=pred, scale=T)
+
+# constrain using mems that explain population structure
+losh.subset.ind.rda.memps <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(MEM1 + MEM2 + MEM4), data = pred_mems, scale = T)
+losh.subset.ind.rda.memps.uncor <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(MEM2 + MEM4 + MEM3), data = pred_mems, scale = T)
+losh.subset.ind.rda.mem1 <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(MEM1), data = pred_mems, scale = T)
+
+
+losh.subset.ind.rda.pc1 <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(PC1), data = pred_pc, scale = T)
+losh.subset.ind.rda.pc1.2 <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(PC1 + PC2), data = pred_pc, scale = T)
+
+RsquareAdj(losh.subset.ind.rda)
+RsquareAdj(losh.subset.ind.rda.memps)
+RsquareAdj(losh.subset.ind.rda.memps.uncor)
+RsquareAdj(losh.subset.ind.rda.mem1)
+RsquareAdj(losh.subset.ind.rda.pc1)
+
+summary(eigenvals(losh.subset.ind.rda, model = "constrained"))
+summary(eigenvals(losh.subset.ind.rda.memps, model = "constrained"))
+
+signif.full <- anova.cca(losh.subset.ind.rda.memps, parallel=getOption("mc.cores")) # default is permutation=999
+signif.full
+
+vif.cca(losh.subset.ind.rda.memps)
+
+
+
+
+plot(losh.subset.ind.rda, scaling=3)          # default is axes 1 and 2
+plot(losh.subset.ind.rda, choices = c(1, 3), scaling=3)
+
+plot(losh.subset.ind.rda.memps, scaling=3)
+plot(losh.subset.ind.rda.memps, choices = c(1, 3), scaling=3) 
+
+plot(losh.subset.ind.rda.mem1, scaling=3)
+plot(losh.subset.ind.rda.mem1, choices = c(1, 3), scaling=3) 
+
+plot(losh.subset.ind.rda.pc1, scaling = 3)
+plot(losh.subset.ind.rda.pc1, choices = c(1, 3), scaling=3) 
+
+
+plot(losh.subset.ind.rda, scaling=3) 
+plot(losh.subset.ind.rda.memps, scaling=3)
+plot(losh.subset.ind.rda.memps.uncor)
+plot(losh.subset.ind.rda.mem1, scaling=3)
+plot(losh.subset.ind.rda.pc1, scaling = 3)
+```
+
+```{r}
+library(RColorBrewer)
+clim_groups <- unique(env$ClimGroup)
+eco <- factor(env$ClimGroup, levels = clim_groups)  # Ensure factor levels match
+bg <- colorRampPalette(brewer.pal(min(12, length(clim_groups)), "Paired"))(length(clim_groups))
+
+
+region_order <- c(
+  "WA_1", "OR_1", "CA_2", "CA_3", "NV_2", "MT_2", "CO_1", "UT_1", "AZ_1",
+  "TX_1", "TX_2", "OK_1", "AR_1", "MS_1", "AL_1", "KY_2", "TN_1", "TN_2", "IN_1", "IL_1",
+  "Ontario_1", "Ontario_2",
+  "NC_1", "NC_2", "VA_1", "VA_2", "WV_1", "FL_1", "LA_1",
+  "Manitoba_1", "Saskatchewan_1", "Alberta_1", "SD_2"
+)
+
+eco <- factor(env$ClimGroup, levels = region_order)
+
+# generate colors based on the reordered factor
+bg <- colorRampPalette(brewer.pal(min(12, length(unique(eco))), "Paired"))(length(unique(eco)))
+
+# check colors
+barplot(rep(1, 33), col = bg, border = NA)
+
+
+# factor.levels <- c("WA_1", "OR_1", "CA_2", "CA_3", "NV_2", "CO_1", "UT_1", "AZ_1",
+#                    "TX_1", "TX_2", "OK_1", "AR_1", "MS_1", "AL_1", 
+#                    "KY_2", "TN_1", "TN_2", "IN_1", "IL_1",
+#                    "Ontario_1", "Ontario_2",
+#                    "Manitoba_1", "Saskatchewan_1", "Alberta_1", "SD_2", "MT_2",
+#                    "NC_1", "NC_2", "VA_1", "VA_2", "WV_1", "FL_1", "LA_1"
+#                    )
+# 
+# # Define the correct number of colors for each region
+# W.cols <- brewer.pal(n = 9, name = "Reds")[2:9]          
+# M.cols <- brewer.pal(n = 6, name = "Greys")[2:7]  
+# Midwest.cols <- brewer.pal(n = 9, name = "Blues")[c(1, 3, 5, 7, 9)]  
+# Ont.cols <- rep("turquoise4", 2)
+# Plains.cols <- brewer.pal(n = 5, name = "Greens")[c(3:7)]  
+# SE.cols <- brewer.pal(n = 7, name = "Purples")[1:7] 
+# 
+# bg <- c(W.cols, M.cols, Midwest.cols, Ont.cols, Plains.cols, SE.cols)
+# names(bg) <- factor.levels
+# 
+# barplot(rep(1, 33), col = bg, border = NA)
+
+# W.cols <- setNames(brewer.pal(n = 9, name = "Reds")[2:9], 
+#                    c("WA_1", "OR_1", "CA_2", "CA_3", "NV_2", "CO_1", "UT_1", "AZ_1"))
+# M.cols <- setNames(brewer.pal(n = 9, name = "Greys")[c(1, 3, 5, 7, 9)], 
+#                    c("TX_1", "TX_2", "OK_1", "AR_1", "MS_1"))
+# Midwest.cols <- setNames(brewer.pal(n = 9, name = "Blues")[c(1, 3, 5, 7, 9)],
+#                          c("KY_2", "TN_1", "TN_2", "IN_1", "IL_1"))
+# Ont.cols <- setNames(rep("turquoise4", 2), c("Ontario_1", "Ontario_2"))
+# 
+# Plains.cols <- setNames(brewer.pal(n = 7, name = "Greens")[c(3:7)],
+#                         c("Manitoba_1", "Saskatchewan_1", "Alberta_1", "SD_2", "MT_2"))
+# SE.cols <- setNames(brewer.pal(n = 9, name = "Purples")[2:9],
+#                     c("NC_1", "NC_2", "VA_1", "VA_2", "WV_1", "FL_1", "LA_1", "AL_1"))
+
+W.cols <- setNames(brewer.pal(n = 9, name = "Reds")[2:9], 
+                   c("WA_1", "OR_1", "CA_2", "CA_3", "NV_2", "CO_1", "UT_1", "AZ_1"))
+
+# Modify M.cols: Remove AL_1
+M.cols <- setNames(brewer.pal(n = 6, name = "Greys")[2:6],  # one fewer color
+                   c("TX_1", "TX_2", "OK_1", "AR_1", "MS_1"))
+
+# Midwest
+Midwest.cols <- setNames(brewer.pal(n = 9, name = "Blues")[c(1, 3, 5, 7, 9)],
+                         c("KY_2", "TN_1", "TN_2", "IN_1", "IL_1"))
+
+# Ontario
+Ont.cols <- setNames(rep("turquoise4", 2), c("Ontario_1", "Ontario_2"))
+
+# Plains
+Plains.cols <- setNames(brewer.pal(n = 7, name = "Greens")[3:7],
+                        c("Manitoba_1", "Saskatchewan_1", "Alberta_1", "SD_2", "MT_2"))
+
+# SE: Add AL_1 at the end
+SE.cols <- setNames(brewer.pal(n = 9, name = "Purples")[2:9],
+                    c("NC_1", "NC_2", "VA_1", "VA_2", "WV_1", "FL_1", "LA_1", "AL_1"))
+
+# Combine all named color vectors
+bg <- c(W.cols, M.cols, Midwest.cols, Ont.cols, Plains.cols, SE.cols)
+
+# Reorder bg to match factor.levels explicitly
+bg <- bg[factor.levels]
+
+# Plot to check
+barplot(rep(1, length(bg)), col = bg, border = NA)
+
+```
+
+```{r}
+#pdf("losh.subset.ind.rda.12.pdf")
+par(mar=c(5, 5, 4, 8))
+plot(losh.subset.ind.rda.memps, type="n", scaling=3)  # Set up empty plot
+#points(losh.subset.ind.rda.memps, display="species", pch=20, cex=0.7, col="gray32", scaling=3) # SNPs
+points(losh.subset.ind.rda.memps, display="sites", pch=21, cex=1.3, col="gray32", scaling=3, bg=bg[eco]) # Individuals
+text(losh.subset.ind.rda.memps, scaling=3, display="bp", col="#0868ac", cex=1)  # Predictors
+#legend("bottomright", legend=levels(eco), bty="n", col="gray32", pch=21, cex=1, pt.bg=bg)
+#legend("bottomright", legend=levels(eco), bty="n", col="gray32", pch=21, cex=0.6, pt.bg=bg)
+#dev.off()
+
+# plot(losh.subset.ind.rda.memps, type="n",choices=c(1,3), scaling=3)  # Set up empty plot
+# points(losh.subset.ind.rda.memps, display="species", pch=20, cex=0.7, col="gray32", scaling=3) # SNPs
+# points(losh.subset.ind.rda.memps, display="sites", pch=21, cex=1.3, col="gray32", scaling=3, bg=bg[eco]) # Individuals
+# text(losh.subset.ind.rda.memps, scaling=3, display="bp", col="#0868ac", cex=1)  # Predictors
+# #legend("bottomright", legend=levels(eco), bty="n", col="gray32", pch=21, cex=1, pt.bg=bg)
+# legend("bottomright", legend=levels(eco), bty="n", col="gray32", pch=21, cex=0.6, pt.bg=bg)
+
+
+# mapping them too
+coords_env <- left_join(coords, env, by = "BGP_ID")
+
+# plotly::ggplotly(ggplot(map) + geom_sf() + geom_point(data = coords_env, aes(x = Long, y = Lat, color = ClimGroup, BGP_ID = BGP_ID)) + scale_fill_manual(values = bg, name = "ClimGroup") +
+# coord_sf(xlim = c(-140, -65), ylim = c(23, 60)))
+
+p <- ggplot(map) +
+  geom_sf(fill = "gray95", color = "white") +
+  geom_sf(
+    data = coords_env, aes(fill = ClimGroup),
+    shape = 21, size = 3, color = "black", stroke = 0.2
+  ) +
+  scale_fill_manual(values = bg, name = "ClimGroup") +
+  coord_sf(xlim = c(-140, -65), ylim = c(23, 60)) +
+  theme_minimal()
+ggsave("losh.subset.ind.rda.memps.map.pdf", p, width = 8, height = 6)
+
+# Interactive plot with tooltips
+plotly::ggplotly(p, tooltip = c("text", "fill"))
+p
+
+par(mar=c(5, 5, 4, 8))
+plot(losh.subset.ind.rda.memps, type="n", scaling=3)  # Set up empty plot
+#points(losh.subset.ind.rda.memps, display="species", pch=20, cex=0.7, col="gray32", scaling=3) # SNPs
+points(losh.subset.ind.rda.memps, display="sites", pch=21, cex=1.3, col="gray32", scaling=3, bg=bg[eco]) # Individuals
+text(losh.subset.ind.rda.memps, scaling=3, display="bp", col="#0868ac", cex=1)
+
+```
+
+
+
+
+
+
+
+
+# following the correct brenna tutorial
+```{r}
+losh.ind.rda.4 <- readRDS("data/losh.ind.rda.top4clim.memps.rds")
+losh.ind.rda.6 <- readRDS("data/losh.ind.rda.top6clim.memps.rds")
+RsquareAdj(losh.ind.rda.6)
+summary(eigenvals(losh.ind.rda.6, model = "constrained"))
+screeplot(losh.ind.rda.6)
+```
+
+```{r}
+RsquareAdj(losh.ind.rda)
+```
+```
+$r.squared
+[1] 0.06129724
+
+$adj.r.squared
+[1] 0.0469659
+```
+The adjusted r-square explains ~ 5% of the variance
+
+```{r}
+summary(eigenvals(losh.ind.rda.3, model = "constrained"))
+```
+```
+Importance of components:
+                           RDA1      RDA2      RDA3      RDA4
+Eigenvalue            5.523e+04 1.558e+04 7.949e+03 5.580e+03
+Proportion Explained  6.548e-01 1.848e-01 9.424e-02 6.615e-02
+Cumulative Proportion 6.548e-01 8.396e-01 9.338e-01 1.000e+00
+```
+The proportion of variance explained by each PC is: RDA1: 65.48%, RDA2: 18.48%, RDA3: 9.42%, RDA4: 6.62%
+
+
+```{r}
+
+## Not sure how to get these lines to run. Seem to stall out??
+
+# signif.full <- anova.cca(losh.ind.rda, parallel=getOption("mc.cores")) # default is permutation=999
+# signif.full
+
+# signif.axis <- anova.cca(losh.ind.rda, by="axis", parallel=getOption("mc.cores"))
+# signif.axis
+
+plot(losh.ind.rda.4, scaling=3)
+```
+
+
+```{r}
+# pop.xy <- read_csv("../../meta/losh_master_092924.csv") %>%
+#   filter(BGP_ID %in% pop$BGP_ID) %>% left_join(pop, by = "BGP_ID") %>% dplyr::select(BGP_ID, ClimGroup, Lat, Long)
+# 
+# group_centroids <- pop.xy %>%
+#   group_by(ClimGroup) %>%
+#   summarize(
+#     mean_lat = mean(Lat, na.rm = TRUE),
+#     mean_long = mean(Long, na.rm = TRUE)
+#   )
+# 
+# geo_pca <- prcomp(group_centroids[, c("mean_long", "mean_lat")], scale. = TRUE)
+# 
+# # use the first principal component (PC1) as the gradient axis
+# group_centroids$geo_score <- geo_pca$x[, 1]
+# 
+# # arrange by PC1 (diagonal axis)
+# group_centroids <- group_centroids %>%
+#   arrange(geo_score)
+# 
+# # create a color palette with as many unique ClimGroups as needed
+# geo_colors <- colorRampPalette(brewer.pal(min(12, nrow(group_centroids)), "YlGnBu"))(nrow(group_centroids))
+# 
+# # assign colors to ClimGroups
+# group_centroids$color <- geo_colors
+# 
+# # create a named vector for easy mapping later
+# clim_colors <- setNames(group_centroids$color, group_centroids$ClimGroup)
+# 
+# pop.xy$color <- clim_colors[pop.xy$ClimGroup]
+# 
+# barplot(rep(1, length(clim_colors)), col = clim_colors, border = NA,
+#         names.arg = names(clim_colors), las = 2, cex.names = 0.7)
+# 
+# geo_order <- group_centroids$ClimGroup
+# eco <- factor(env$ClimGroup, levels = geo_order)
+# 
+# # create bg color vector matching individuals in env to geographic colors
+# bg <- clim_colors[as.character(eco)]
+
+
+pop.xy <- read_csv("../../meta/losh_master_092924.csv") %>%
+  filter(BGP_ID %in% pop$BGP_ID) %>%
+  left_join(pop, by = "BGP_ID") %>%
+  select(BGP_ID, ClimGroup, Lat, Long)
+
+# Calculate centroids per ClimGroup
+group_centroids <- pop.xy %>%
+  group_by(ClimGroup) %>%
+  summarize(
+    mean_lat = mean(Lat, na.rm = TRUE),
+    mean_long = mean(Long, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Arrange by **mean latitude** for north-south gradient
+group_centroids <- group_centroids %>%
+  arrange(desc(mean_lat))  # Descending so that northern groups are at the top
+
+# Generate geographic color gradient
+geo_colors <- colorRampPalette(brewer.pal(min(12, nrow(group_centroids)), "YlGnBu"))(nrow(group_centroids))
+
+# Assign colors to ClimGroups
+group_centroids$color <- geo_colors
+clim_colors <- setNames(group_centroids$color, group_centroids$ClimGroup)
+
+# Map colors to each population point
+pop.xy$color <- clim_colors[pop.xy$ClimGroup]
+
+# Optional: show color bar
+barplot(rep(1, length(clim_colors)), col = clim_colors, border = NA,
+        names.arg = names(clim_colors), las = 2, cex.names = 0.7)
+
+# Create ordered factor for plotting
+geo_order <- group_centroids$ClimGroup
+eco <- factor(env$ClimGroup, levels = geo_order)
+
+# Assign colors to individuals for plotting
+bg <- clim_colors[as.character(eco)]
+```
+
+# make this plot colorful
+```{r}
+all(rownames(env) == rownames(losh.ind.rda.6)) ##order matches if TRUE
+## it does
+
+plot(losh.ind.rda.6, type = "n", scaling = 3)  # Empty RDA plot
+#points(losh.ind.rda.6, display = "species", pch = 20, cex = 0.7, col = "gray32", scaling = 3)  # SNPs
+points(losh.ind.rda.6, display = "sites", pch = 21, cex = 1.3, col = "gray32", scaling = 3, bg = bg[eco])  # Individuals
+text(losh.ind.rda.6, scaling = 3, display = "bp", col = "#0868ac", cex = 1)  # Predictors
+#legend("bottomright", legend = levels(eco), bty = "n", col = "gray32", pch = 21, pt.bg = bg, cex = 0.6)
+
+```
+
+## plot pop region colors
+```{r}
+W.cols <- setNames(brewer.pal(n = 9, name = "Reds")[2:9], 
+                   c("WA_1", "OR_1", "CA_2", "CA_3", "NV_2", "CO_1", "UT_1", "AZ_1"))
+# Modify M.cols: Remove AL_1
+M.cols <- setNames(brewer.pal(n = 6, name = "Greys")[2:6],  # one fewer color
+                   c("TX_1", "TX_2", "OK_1", "AR_1", "MS_1"))
+# Midwest
+Midwest.cols <- setNames(brewer.pal(n = 9, name = "Blues")[c(1, 3, 5, 7, 9)],
+                         c("KY_2", "TN_1", "TN_2", "IN_1", "IL_1"))
+# Ontario
+Ont.cols <- setNames(rep("turquoise4", 2), c("Ontario_1", "Ontario_2"))
+# Plains
+Plains.cols <- setNames(brewer.pal(n = 7, name = "Greens")[3:7],
+                        c("Manitoba_1", "Saskatchewan_1", "Alberta_1", "SD_2", "MT_2"))
+# SE: Add AL_1 at the end
+SE.cols <- setNames(brewer.pal(n = 9, name = "Purples")[2:9],
+                    c("NC_1", "NC_2", "VA_1", "VA_2", "WV_1", "FL_1", "LA_1", "AL_1"))
+# Combine all named color vectors
+bg <- c(W.cols, M.cols, Midwest.cols, Ont.cols, Plains.cols, SE.cols)
+# Reorder bg to match factor.levels explicitly
+#bg <- bg[factor.levels]
+# Plot to check
+barplot(rep(1, length(bg)), col = bg, border = NA)
+
+p <- ggplot(map) +
+  geom_sf(fill = "gray95", color = "white") +
+  geom_point(
+    data = coords_env,
+    aes(x = Long, y = Lat, fill = ClimGroup, text = BGP_ID),
+    shape = 21, size = 3, color = "black", stroke = 0.2
+  ) +
+  scale_fill_manual(values = bg, name = "ClimGroup") +
+  coord_sf(xlim = c(-140, -65), ylim = c(23, 60)) +
+  theme_minimal()
+
+
+#eco <- meta$EcoRegion[match(rownames(losh.ind.rda.6$sites), meta$SampleID)]
+
+# Interactive plot with tooltips
+plotly::ggplotly(p, tooltip = c("text", "fill"))
+p
+
+pdf("losh.ind.rda.6.memps.pdf")
+par(mar=c(5, 5, 4, 8))
+plot(losh.ind.rda.6, type="n", scaling=3)  # Set up empty plot
+#points(losh.subset.ind.rda.memps, display="species", pch=20, cex=0.7, col="gray32", scaling=3) # SNPs
+points(losh.ind.rda.6, display="sites", pch=21, cex=1.3, col="gray32", scaling=3, bg=bg[eco]) # Individuals
+text(losh.ind.rda.6, scaling=3, display="bp", col="#0868ac", cex=1)
+dev.off()
+```
+
+
+
+
+
+# select outlier snps
+```{r}
+load.rda <- scores(losh.ind.rda.6, choices=c(1:3), display="species")
+
+hist(load.rda[,1], main="Loadings on RDA1")
+hist(load.rda[,2], main="Loadings on RDA2")
+hist(load.rda[,3], main="Loadings on RDA3")
+
+outliers <- function(x,z){
+  lims <- mean(x) + c(-1, 1) * z * sd(x)   #find loadings +/-z sd from mean loading     
+  x[x < lims[1] | x > lims[2]]             #locus names in these tails
+}
+
+cand1 <- outliers(load.rda[,1],2) # 75998
+cand2 <- outliers(load.rda[,2],2) # 63347
+cand3 <- outliers(load.rda[,3],2) # 63725
+
+##Find total # candidates
+ncand <- length(cand1) + length(cand2) + length(cand3)
+
+df.cand1 <- cbind.data.frame(rep(1,times=length(cand1)), names(cand1), unname(cand1))
+df.cand2 <- cbind.data.frame(rep(2,times=length(cand2)), names(cand2), unname(cand2))
+df.cand3 <- cbind.data.frame(rep(3,times=length(cand3)), names(cand3), unname(cand3))
+
+colnames(df.cand1) <- colnames(df.cand2) <- colnames(df.cand3) <- c("axis","snp","loading")
+
+df.cand <- rbind(df.cand1, df.cand2, df.cand3)
+df.cand$snp <- as.character(df.cand$snp)
+
+df.cand$snp <- gsub("-", ".", df.cand$snp)
+
+pred <- subset(env, select=c(bio18, bio8, bio7, bio2, bio15, bio3))
+
+##Add environmental correlations to candidate snps
+foo <- matrix(nrow=(ncand), ncol=6)  #6 columns for 6 predictors
+colnames(foo) <- c("bio18", "bio8", "bio7","bio2", "bio15", "bio3")
+pred2 <- pred[,1:6]
+
+for (i in 1:length(df.cand$snp)) {
+  nam <- df.cand[i,2]
+  snp.gen <- subset[[nam]]
+  foo[i,] <- apply(pred2,2,function(x) cor(x,snp.gen))
+}
+
+cand <- cbind.data.frame(df.cand,foo)
+
+length(cand$snp[duplicated(cand$snp)])
+foo <- cbind(cand$axis, duplicated(cand$snp)) 
+table(foo[foo[,1]==1,2]) # no duplicates on axis 1
+table(foo[foo[,1]==2,2]) # 18202 duplicates on axis 2
+table(foo[foo[,1]==3,2]) # 18787 duplicates on axis 3
+cand <- cand[!duplicated(cand$snp),] # remove duplicate detections
+
+cols <- as.numeric(ncol(cand))
+for (i in 1:length(cand$snp)) {
+  bar <- cand[i,]
+  cand[i,(cols+1)] <- names(which.max(abs(bar[4:cols]))) # gives the variable
+  cand[i,(cols+2)] <- max(abs(bar[4:cols]))              # gives the correlation
+}
+
+colnames(cand)[cols+1] <- "predictor"
+colnames(cand)[cols+2] <- "correlation"
+
+table(cand$predictor)
+# 266: bio 18 = Precipitation of Warmest Quarter
+# 583 bio 2 = Mean Diurnal Temperature Range (Mean of monthly (max temp - min temp))
+# 234 bio 7 = Temperature Annual Range
+# 304 bio 8 = Mean Temperature of Wettest Quarter
+
+write.table(cand,"ind.rda.6.memps.cand.snps.txt",row.names=F,sep = "\t", quote=F)
+
+sel <- cand$snp
+env <- cand$predictor
+env[env=="bio18"] <- '#1b9e77'
+env[env=="bio"] <- '#d95f02'
+env[env=="bio7"] <- "purple4"
+env[env=="bio8"] <-  '#e7298a'
+
+col.pred <- rownames(losh.subset.ind.rda.memps$CCA$v) # pull the SNP names
+
+for (i in 1:length(sel)) {           # color code candidate SNPs
+  foo <- match(sel[i],col.pred)
+  col.pred[foo] <- env[i]
+}
+
+col.pred[grep("scaffold",col.pred)] <- '#f1eef6' # non-candidate SNPs
+col.pred[!grepl("^#", col.pred)] <- "#f1eef6"
+empty <- col.pred
+empty[grep("#f1eef6",empty)] <- rgb(0,1,0, alpha=0) # transparent
+
+empty <- col.pred
+empty[empty == "#f1eef6"] <- rgb(0, 1, 0, alpha = 0)
+
+empty.outline <- ifelse(empty == "#00FF0000", "#00FF0000", "gray32")
+
+bg <- c('#1b9e77','#d95f02',"purple4",'#e7298a')
+
+
+plot(losh.subset.ind.rda.memps, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1))
+#points(cawa2.rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3)
+points(losh.subset.ind.rda.memps, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3)
+text(losh.subset.ind.rda.memps, scaling=3, display="bp", col="#0868ac", cex=1)
+legend("bottomright", legend=c("bio18","bio2","bio07","bio8"), bty="n", col="gray32", pch=21, cex=1, pt.bg=bg)
+
+```
+
+
+
