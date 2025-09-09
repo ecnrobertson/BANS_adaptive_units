@@ -90,16 +90,10 @@ env$BGP_ID == indorder$BGP_ID
 
 env %>% select(-"BGP_ID") %>% write.table("BANS.climtop6.txt", row.names = F, quote = F, sep = "\t")
 
-env %>% select(-"BGP_ID", bio18, bio8, bio7, bio2) %>% write.table("data/LOSH.264.ind.33pop.climtop4.txt", row.names = F, quote = F, sep = "\t")
-
-
-#
+env %>% select(-"BGP_ID", bio02, bio03, bio05, bio07) %>% write.table("../../data/BANS.climtop4.txt", row.names = F, quote = F, sep = "\t")
 
 ## read this in in the rda.R script
-env2 <- fread("data/LOSH.264.ind.33pop.climtop6.txt", sep = "\t")
-
-
-
+env2 <- fread("../../data/BANS.climtop4.txt", sep = "\t")
 ```
 
 ```{r}
@@ -115,9 +109,15 @@ env2 <- fread("data/LOSH.264.ind.33pop.climtop6.txt", sep = "\t")
 ```
 
 ###plink pca
+In this step we're making the population structure PCA to identify mems that can be used to control for population structure later when running the RDA. You want to do N-1 for your number of PC's, where N is the population size.
+```{bash}
+plink --bfile ../BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5 --pca 138 header --out BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5 --aec 
 ```
-plink --bfile pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid --pca 10 header --out pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid --aec 
+move the files over
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.* /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA/pop_struc
 ```
+
 ```{r}
 # load required libraries
 library(adespatial) # for spatial eigenfunction analysis like dbMEM
@@ -125,17 +125,109 @@ library(sf) # for handling spatial features (coordinates, projections, etc.)
 library(vegan) # for multivariate analysis (e.g., RDA, PCA, variable selection)
 library(data.table)
 
-indorder <- fread("data/pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid.fam") %>% rename(BGP_ID = V1) %>% dplyr::select(BGP_ID)
+indorder <- fread("../../data/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.fam") %>% rename(BGP_ID = V1) %>% dplyr::select(BGP_ID)
 
 # read in plink pca
-plink_pca <- read.table("/Users/holdenfox/Downloads/pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid.eigenvec", header = TRUE)
+plink_pca <- read.table("pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenvec", header = TRUE)
 
 # clean and rename: drop 'FID' and rename 'IID' to 'BGP_ID' to match other metadata
 plink_pca <- plink_pca %>% dplyr::select(-FID) %>% rename(BGP_ID = IID)
+```
+### visualizing pop struc
+Let's go through the plotting of the PCA to stay oriented. Then we can do the mems.
 
+```{r}
+library(tidyverse)
+plink_pca <- read.table("pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenvec", header = TRUE)
+eigenval <- scan("pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenval")
+
+# set names
+pca05 <- plink_pca
+names(pca05)[1] <- "ind"
+nrow(pca05)
+#correct number of samples
+
+id.loc <- read.csv("../../data/BANS_sample_data.csv")
+
+loc <- data.frame(as.factor(id.loc$BGP.ID), id.loc$Location)
+colnames(loc) <- c("ind", "site")
+pca05 <- left_join(pca05, loc, by="ind")
+pca05$spp <- "BANS"
+spp <- pca05$spp
+pca05 <- pca05 %>% select(spp, ind, site, everything())
+
+# combine - if you want to plot each in different colours
+spp_loc <- paste0("BANS", "_", pca05$site)
+
+pca05 <- as_tibble(data.frame(pca05, spp_loc))
+```
+```{r}
+pve05 <- data.frame(PC = 1:138, pve = eigenval/sum(eigenval)*100)
+
+# make plot
+a05 <- ggplot(pve05, aes(PC, pve)) + geom_bar(stat = "identity")
+a05 + ylab("Percentage variance explained") + theme_light()
+
+b05 <- ggplot(pca05, aes(PC1, PC2, col = site))+
+  geom_point(size = 3)+
+  scale_color_manual(values = scales::hue_pal()(15))+
+  coord_equal() + theme_light()+
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+b05
+```
+```{r}
+# run hierarchical clustering on PC1 and PC2
+dist_mat <- dist(pca05[, c("PC1", "PC2")])        # distance matrix
+hc <- hclust(dist_mat, method = "ward.D2")        # clustering
+
+# choose number of clusters (try different k)
+k <- 5
+pca05$cluster <- factor(cutree(hc, k = k))        # assign cluster labels
+
+# plot PCA colored by clusters
+b05_clustered <- ggplot(pca05, aes(PC1, PC2, col = cluster)) +
+  geom_point(size = 3) +
+  coord_equal() +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)")) +
+  scale_color_manual(values = scales::hue_pal()(k))
+
+b05_clustered
+
+```
+```{r}
+# install if needed
+#install.packages("mclust")
+library(mclust)
+
+# run model-based clustering on PC1 and PC2
+mc <- Mclust(pca05[, c("PC1", "PC2")])
+
+# add cluster assignments to your data frame
+pca05$cluster <- factor(mc$classification)
+
+# plot PCA colored by mclust clusters
+b05_mclust <- ggplot(pca05, aes(PC1, PC2, col = cluster)) +
+  geom_point(size = 3) +
+  coord_equal() +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)")) +
+  scale_color_manual(values = scales::hue_pal()(length(unique(pca05$cluster))))
+
+b05_mclust
+
+# check how many clusters it found
+mc$G
+```
+## mems
+
+```{r}
 ## mems
 # read in coordinates from metadata file and filter for individuals in indorder
-coords <- read_csv("../../meta/losh_master_092924.csv") %>%
+coords <- read_csv("../../data/BANS_sample_data.csv") %>%
+  rename(BGP_ID = "BGP ID") %>% 
   filter(BGP_ID %in% indorder$BGP_ID) %>% 
   dplyr::select(BGP_ID, Long, Lat)
 
@@ -152,12 +244,13 @@ mem <- adespatial::dbmem(dist, MEM.autocor = "all")
 
 #moran_test <- moran.randtest(mem)
 
-# rda to assess how much MEMs explain genetic variation (PC1–PC3)
-mem_rda <- vegan::rda(plink_pca[,c("PC1", "PC2", "PC3")] ~ ., as.data.frame(mem[,1:10]))
+# rda to assess how much MEMs explain genetic variation (PC1–PC2)
+mem_rda <- vegan::rda(plink_pca[,c("PC1", "PC2")] ~ ., as.data.frame(mem[,1:10]))
 summary(mem_rda)
 
 # create a null (intercept-only) rda model as a baseline
-mem_rda_full <- vegan::rda(plink_pca[,c("PC1", "PC2", "PC3")] ~ 1, as.data.frame(mem[,1:10]))
+mem_rda_full <- vegan::rda(plink_pca[,c("PC1", "PC2")] ~ 1, as.data.frame(mem[,1:10]))
+summary(mem_rda_full)
 
 # stepwise forward selection of mem variables based on adjusted R-square and significance
 selmem <- vegan::ordiR2step(mem_rda_full, mem_rda, Pin = .01)
@@ -168,60 +261,46 @@ selmem <- names(selmem$terminfo$ordered)
 # subset the mem matrix to include only the mems that explain population structure
 mem_popstr <- mem[,selmem]
 
-#saveRDS(mem_popstr, file = "data/losh.mems.popstr.rds")
+saveRDS(mem_popstr, file = "BANS.mems.popstr.rds")
 
 ```
 
-
 ```{r}
-coords_mems_pc <- cbind(coords, mem, plink_pca[,c("PC1", "PC2", "PC3")])
+coords_mems_pc <- cbind(coords, mem, plink_pca[,c("PC1", "PC2")])
 
 map <- rnaturalearth::ne_states(country = c("United States of America", "Canada", "Mexico"), returnclass = 'sf')
+
 # plot the populations you defined. use plotly to zoom around easy
 mem4_map<- ggplot(map) + geom_sf() + geom_point(data = coords_mems_pc, aes(x = Long, y = Lat, color = MEM4, BGP_ID = BGP_ID)) +
 coord_sf(xlim = c(-125, -70), ylim = c(23, 58)) + scale_color_viridis_c()
 ggsave("mem4_map.pdf", mem4_map, width = 8, height = 6)
 
 
-plot(coords_mems_pc[,c("PC1", "PC2", "PC3", paste0("MEM",1:9))])
+plot(coords_mems_pc[,c("PC1", "PC2", paste0("MEM",1:9))])
 ```
 
-One thing the paper that I saw in the paper recommending this did afterwards was select MEMs from the final set (selmem) which are uncorrelated with your selected environmental variables as well. You can do that like:
-```{r}
-corselmem <- cor(mem[,selmem], pred) # remove any correlated
-corselmem <- rownames(corselmem)[which(rowSums(abs(corselmem) >= 0.7) > 0)]
-uncorselmem <- mem[,selmem]
-uncorselmem <- as.data.frame(uncorselmem)[,-which(colnames(uncorselmem) %in% corselmem), drop = FALSE]
-#saveRDS(uncorselmem, file = "data/losh.mems.popstr.uncor.rds")
-```
 
-I got annoyed with trying to plot and so stats on all data so i'm going to do a subset of 10,000 snps like brenna does.
+I'm going to do a subset of 10,000 snps like brenna does.
 ```{r}
 library(data.table)
 library(adegenet)
 library(adegenet)
 
 # Load PLINK raw file as a genlight object
-# plink_data <- read.PLINK("data/pass-maf-0.05-SNP-5miss-267ind-33pop-rm-scaf-lth10-gtgl-impute4.1-snpid.raw")
-# # convert genlight object to a genotype matrix
-# geno_matrix <- as.matrix(plink_data)  # This extracts SNP genotypes
-# # get SNP names
-# snp_names <- colnames(geno_matrix)
-# # ensure there are enough SNPs to sample
-# num_snps_to_sample <- min(10000, length(snp_names)) ##there is
-# # randomly sample 10,000 SNPs (or fewer if there aren't that many)
-# set.seed(123)
-# selected_snps <- sample(snp_names, num_snps_to_sample)
-# # subset the genotype matrix
-# geno_subset <- geno_matrix[, selected_snps]
-# # convert back to a genlight object
-# plink_subset <- new("genlight", geno_subset)
-# # save the subsetted SNP data (as a CSV or other format)
-# write.table(as.data.frame(geno_subset), "subset_10000_snps.csv", sep = ",", quote = FALSE, row.names = TRUE)
+plink_data <- read.PLINK("../../data/subsampled_noheader.raw")
+# convert genlight object to a genotype matrix
+geno_matrix <- as.matrix(plink_data)  # This extracts SNP genotypes
+# get SNP names
+snp_names <- colnames(geno_matrix)
+# convert back to a genlight object
+plink_subset <- new("genlight", geno_matrix)
+# save the subsetted SNP data (as a CSV or other format)
+write.table(as.data.frame(plink_subset), "subset_10000_snps.csv", sep = ",", quote = FALSE, row.names = TRUE)
 
-subset <- read.csv("~/Downloads/subset_10000_snps.csv")
-env <- fread("data/LOSH.264.ind.33pop.climtop6.txt")
-pop <- fread("../losh.33pop.txt", header = F) %>% dplyr::select(-V2) %>% rename(BGP_ID = V1, ClimGroup = V3)
+subset <- read.csv("subset_10000_snps.csv")
+env <- fread("BANS.climtop6.txt")
+pop <- fread("BANS_sample_list_pop.tsv", header = F)  %>% dplyr::select(-V2) %>% rename(BGP_ID = V1, ClimGroup = V3)
+
 bgp_ids <- data.frame(BGP_ID = rownames(subset))
 pop <- pop %>% slice(match(bgp_ids$BGP_ID, pop$BGP_ID)) ## make ind same order as snpfile & env data
 env <- cbind(pop, env)
@@ -234,71 +313,119 @@ env[, BGP_ID := as.character(BGP_ID)]
 # Convert ClimGroup to a factor if it's categorical
 env[, ClimGroup := as.factor(ClimGroup)]
 
-# Convert bio2 to numeric (to match bio18, bio8, bio7)
-env[, bio2 := as.numeric(bio2)]
-
-#reordering?
-# env[, BGP_ID := as.character(BGP_ID)]
-# rownames(subset) <- as.character(rownames(subset))
-# 
-# env <- env[match(rownames(subset), env$BGP_ID), ]
-
 all(rownames(subset) == env$BGP_ID)
 
-pred <- subset(env, select=c(bio18, bio8, bio7, bio2, bio15, bio3))
+pred <- subset(env, select=c("bio02", "bio05", "bio07", "bio03"))
 
 pred_mems <- cbind(pred, as.data.frame(mem_popstr))
 
-pred_pc <- cbind(pred, plink_pca %>% dplyr::select(PC1, PC2, PC3))
+pred_pc <- cbind(pred, plink_pca %>% dplyr::select(PC1, PC2))
 
-losh.subset.ind.rda <- rda(subset ~ ., data=pred, scale=T)
+bans.subset.ind.rda <- rda(subset ~ ., data=pred, scale=T)
 
-# constrain using mems that explain population structure
-losh.subset.ind.rda.memps <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(MEM1 + MEM2 + MEM4), data = pred_mems, scale = T)
-losh.subset.ind.rda.memps.uncor <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(MEM2 + MEM4 + MEM3), data = pred_mems, scale = T)
-losh.subset.ind.rda.mem1 <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(MEM1), data = pred_mems, scale = T)
-
-
-losh.subset.ind.rda.pc1 <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(PC1), data = pred_pc, scale = T)
-losh.subset.ind.rda.pc1.2 <- rda(subset ~ bio18 + bio8 + bio7 + bio2 + Condition(PC1 + PC2), data = pred_pc, scale = T)
-
-RsquareAdj(losh.subset.ind.rda)
-RsquareAdj(losh.subset.ind.rda.memps)
-RsquareAdj(losh.subset.ind.rda.memps.uncor)
-RsquareAdj(losh.subset.ind.rda.mem1)
-RsquareAdj(losh.subset.ind.rda.pc1)
-
-summary(eigenvals(losh.subset.ind.rda, model = "constrained"))
-summary(eigenvals(losh.subset.ind.rda.memps, model = "constrained"))
-
-signif.full <- anova.cca(losh.subset.ind.rda.memps, parallel=getOption("mc.cores")) # default is permutation=999
-signif.full
-
-vif.cca(losh.subset.ind.rda.memps)
-
-
-
-
-plot(losh.subset.ind.rda, scaling=3)          # default is axes 1 and 2
-plot(losh.subset.ind.rda, choices = c(1, 3), scaling=3)
-
-plot(losh.subset.ind.rda.memps, scaling=3)
-plot(losh.subset.ind.rda.memps, choices = c(1, 3), scaling=3) 
-
-plot(losh.subset.ind.rda.mem1, scaling=3)
-plot(losh.subset.ind.rda.mem1, choices = c(1, 3), scaling=3) 
-
-plot(losh.subset.ind.rda.pc1, scaling = 3)
-plot(losh.subset.ind.rda.pc1, choices = c(1, 3), scaling=3) 
-
-
-plot(losh.subset.ind.rda, scaling=3) 
-plot(losh.subset.ind.rda.memps, scaling=3)
-plot(losh.subset.ind.rda.memps.uncor)
-plot(losh.subset.ind.rda.mem1, scaling=3)
-plot(losh.subset.ind.rda.pc1, scaling = 3)
 ```
 
+One thing the paper that I saw in the paper recommending this did afterwards was select MEMs from the final set (selmem) which are uncorrelated with your selected environmental variables as well. You can do that like:
+```{r}
+corselmem <- cor(mem[,selmem], pred) # remove any correlated
+# identify variables with correlation >= 0.7 with *any other variable*
+highcor <- rownames(corselmem)[apply(abs(corselmem) >= 0.7, 1, any)]
+
+# remove those
+uncorselmem <- mem[, selmem]
+uncorselmem <- uncorselmem[, !(colnames(uncorselmem) %in% highcor), drop = FALSE]
+
+saveRDS(uncorselmem, file = "bans.mems.popstr.uncor.rds")
+```
+
+```{r}
+### 1. Fit RDAs ----
+# Baseline (env only)
+rda_env      <- rda(subset ~ bio02 + bio05 + bio07 + bio03, data = pred, scale = TRUE)
+
+# Control for MEMs (full, uncorrelated, single MEM1)
+rda_env_mems <- rda(subset ~ bio02 + bio05 + bio07 + bio03 +
+                      Condition(MEM1 + MEM5 + MEM4 + MEM3 + MEM7),
+                    data = pred_mems, scale = TRUE)
+
+rda_env_mems_uncor <- rda(subset ~ bio02 + bio05 + bio07 + bio03 +
+                            Condition(MEM4 + MEM3 + MEM7),
+                          data = pred_mems, scale = TRUE)
+
+rda_env_mem1 <- rda(subset ~ bio02 + bio05 + bio07 + bio03 +
+                      Condition(MEM1),
+                    data = pred_mems, scale = TRUE)
+
+# Control for PCs
+rda_env_pc1   <- rda(subset ~ bio02 + bio05 + bio07 + bio03 +
+                       Condition(PC1),
+                     data = pred_pc, scale = TRUE)
+
+rda_env_pc12  <- rda(subset ~ bio02 + bio05 + bio07 + bio03 +
+                       Condition(PC1 + PC2),
+                     data = pred_pc, scale = TRUE)
+
+
+### 2. Model comparisons ----
+# Adjusted R2
+RsquareAdj(rda_env)
+RsquareAdj(rda_env_mems)
+RsquareAdj(rda_env_mems_uncor)
+RsquareAdj(rda_env_mem1)
+RsquareAdj(rda_env_pc1)
+RsquareAdj(rda_env_pc12)
+
+# Eigenvalues (variance explained by constrained axes)
+summary(eigenvals(rda_env, model = "constrained"))
+summary(eigenvals(rda_env_mems, model = "constrained"))
+
+# Significance (example with MEMs)
+anova.cca(rda_env_mems, parallel = getOption("mc.cores"))
+
+# VIF (check collinearity among predictors)
+vif.cca(rda_env_mems)
+
+
+### 3. Plots ----
+# Baseline
+plot(rda_env, scaling = 3)
+plot(rda_env, choices = c(1, 3), scaling = 3)
+
+# MEMs
+plot(rda_env_mems, scaling = 3)
+plot(rda_env_mems, choices = c(1, 3), scaling = 3)
+plot(rda_env_mems_uncor, scaling = 3)
+plot(rda_env_mem1, scaling = 3)
+
+# PCs
+plot(rda_env_pc1, scaling = 3)
+plot(rda_env_pc1, choices = c(1, 3), scaling = 3)
+plot(rda_env_pc12, scaling = 3)
+```
+
+ChatGPT is gonna make the model comparison easy for me:
+```{r}
+### Helper function to extract key stats from an RDA ----
+rda_summary <- function(model, name) {
+  r2   <- RsquareAdj(model)$adj.r.squared
+  pval <- anova.cca(model, parallel = getOption("mc.cores"))$`Pr(>F)`[1]  # model-level test
+  eig  <- summary(eigenvals(model, model = "constrained"))[1]             # variance on axis 1
+  data.frame(Model = name, AdjR2 = r2, Pval = pval, Axis1_var = eig)
+}
+
+### Build comparison table ----
+results <- rbind(
+  rda_summary(rda_env,        "Env only"),
+  rda_summary(rda_env_mems,   "Env + MEMs"),
+  rda_summary(rda_env_mems_uncor, "Env + MEMs (uncor)"),
+  rda_summary(rda_env_mem1,   "Env + MEM1"),
+  rda_summary(rda_env_pc1,    "Env + PC1"),
+  rda_summary(rda_env_pc12,   "Env + PC1+PC2")
+)
+
+print(results)
+
+```
 ```{r}
 library(RColorBrewer)
 clim_groups <- unique(env$ClimGroup)
@@ -391,15 +518,15 @@ barplot(rep(1, length(bg)), col = bg, border = NA)
 ```
 
 ```{r}
-#pdf("losh.subset.ind.rda.12.pdf")
+pdf("bans.subset.ind.rda.12.pdf")
 par(mar=c(5, 5, 4, 8))
-plot(losh.subset.ind.rda.memps, type="n", scaling=3)  # Set up empty plot
+plot(bans.subset.ind.rda.memps, type="n", scaling=3)  # Set up empty plot
 #points(losh.subset.ind.rda.memps, display="species", pch=20, cex=0.7, col="gray32", scaling=3) # SNPs
-points(losh.subset.ind.rda.memps, display="sites", pch=21, cex=1.3, col="gray32", scaling=3, bg=bg[eco]) # Individuals
-text(losh.subset.ind.rda.memps, scaling=3, display="bp", col="#0868ac", cex=1)  # Predictors
+points(bans.subset.ind.rda.memps, display="sites", pch=21, cex=1.3, col="gray32", scaling=3, bg=bg[eco]) # Individuals
+text(bans.subset.ind.rda.memps, scaling=3, display="bp", col="#0868ac", cex=1)  # Predictors
 #legend("bottomright", legend=levels(eco), bty="n", col="gray32", pch=21, cex=1, pt.bg=bg)
 #legend("bottomright", legend=levels(eco), bty="n", col="gray32", pch=21, cex=0.6, pt.bg=bg)
-#dev.off()
+dev.off()
 
 # plot(losh.subset.ind.rda.memps, type="n",choices=c(1,3), scaling=3)  # Set up empty plot
 # points(losh.subset.ind.rda.memps, display="species", pch=20, cex=0.7, col="gray32", scaling=3) # SNPs
@@ -645,7 +772,7 @@ dev.off()
 
 # select outlier snps
 ```{r}
-load.rda <- scores(losh.ind.rda.6, choices=c(1:3), display="species")
+load.rda <- scores(rda_env_mems_uncor, choices=c(1:3), display="species")
 
 hist(load.rda[,1], main="Loadings on RDA1")
 hist(load.rda[,2], main="Loadings on RDA2")
@@ -674,12 +801,12 @@ df.cand$snp <- as.character(df.cand$snp)
 
 df.cand$snp <- gsub("-", ".", df.cand$snp)
 
-pred <- subset(env, select=c(bio18, bio8, bio7, bio2, bio15, bio3))
+pred <- subset(env, select=c(bio02 + bio05 + bio07 + bio03))
 
 ##Add environmental correlations to candidate snps
-foo <- matrix(nrow=(ncand), ncol=6)  #6 columns for 6 predictors
-colnames(foo) <- c("bio18", "bio8", "bio7","bio2", "bio15", "bio3")
-pred2 <- pred[,1:6]
+foo <- matrix(nrow=(ncand), ncol=4)  #4 columns for 4 predictors
+colnames(foo) <- c("bio02", "bio05", "bio07","bio3")
+pred2 <- pred[,1:4]
 
 for (i in 1:length(df.cand$snp)) {
   nam <- df.cand[i,2]
@@ -707,21 +834,17 @@ colnames(cand)[cols+1] <- "predictor"
 colnames(cand)[cols+2] <- "correlation"
 
 table(cand$predictor)
-# 266: bio 18 = Precipitation of Warmest Quarter
-# 583 bio 2 = Mean Diurnal Temperature Range (Mean of monthly (max temp - min temp))
-# 234 bio 7 = Temperature Annual Range
-# 304 bio 8 = Mean Temperature of Wettest Quarter
 
 write.table(cand,"ind.rda.6.memps.cand.snps.txt",row.names=F,sep = "\t", quote=F)
 
 sel <- cand$snp
 env <- cand$predictor
-env[env=="bio18"] <- '#1b9e77'
-env[env=="bio"] <- '#d95f02'
-env[env=="bio7"] <- "purple4"
-env[env=="bio8"] <-  '#e7298a'
+env[env=="bio02"] <- '#1b9e77'
+env[env=="bio05"] <- '#d95f02'
+env[env=="bio07"] <- "purple4"
+env[env=="bi03"] <-  '#e7298a'
 
-col.pred <- rownames(losh.subset.ind.rda.memps$CCA$v) # pull the SNP names
+col.pred <- rownames(rda_env_mems_uncor$CCA$v) # pull the SNP names
 
 for (i in 1:length(sel)) {           # color code candidate SNPs
   foo <- match(sel[i],col.pred)
@@ -741,12 +864,11 @@ empty.outline <- ifelse(empty == "#00FF0000", "#00FF0000", "gray32")
 bg <- c('#1b9e77','#d95f02',"purple4",'#e7298a')
 
 
-plot(losh.subset.ind.rda.memps, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1))
+plot(rda_env_mems_uncor, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1))
 #points(cawa2.rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3)
-points(losh.subset.ind.rda.memps, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3)
-text(losh.subset.ind.rda.memps, scaling=3, display="bp", col="#0868ac", cex=1)
+points(rda_env_mems_uncor, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3)
+text(rda_env_mems_uncor, scaling=3, display="bp", col="#0868ac", cex=1)
 legend("bottomright", legend=c("bio18","bio2","bio07","bio8"), bty="n", col="gray32", pch=21, cex=1, pt.bg=bg)
-
 ```
 
 

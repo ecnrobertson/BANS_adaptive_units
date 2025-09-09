@@ -3,13 +3,13 @@ Options in effect:
   --allow-extra-chr
   --bfile ../BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5
   --out BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5
-  --pca 10 header
+  --pca 138 header
 
-Hostname: login-ci4
+Hostname: login-ci5
 Working directory: /scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/pop_struc
-Start time: Tue Aug 26 12:36:02 2025
+Start time: Tue Sep  2 12:05:41 2025
 
-Random number seed: 1756233362
+Random number seed: 1756836341
 7695 MB RAM detected; reserving 3847 MB for main workspace.
 1584271 variants loaded from .bim file.
 139 people (0 males, 0 females, 139 ambiguous) loaded from .fam.
@@ -25,4 +25,4 @@ Relationship matrix calculation complete.
 BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenval and
 BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenvec .
 
-End time: Tue Aug 26 12:36:09 2025
+End time: Tue Sep  2 12:05:49 2025
