@@ -5,3 +5,8 @@
 data/
 analysis/03.GEA/pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenval
 analysis/03.GEA/pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenvec
+analysis/03.GEA/results/
+analysis/04.delineate_AUs/results/
+analysis/05.predictors_of_decline/results/
+analysis/05.predictors_of_decline/spatial_predictors/
+analysis/06.genomic_offset/results/
