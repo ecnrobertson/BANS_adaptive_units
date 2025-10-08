@@ -1,0 +1,237 @@
+---
+title: "05.1.spatial_predictors"
+output: html_document
+---
+
+This is going to wrangling the spatial data I want to include in my GAMM model for predicting decline in Bank Swallow.
+# Libraries
+```{r}
+library(terra)
+library(tidyverse)
+library(data.table)
+library(sf)
+library(ggplot2)
+```
+# Land Cover
+## All North America?
+NA_NALCMS_landcover_2020v2_30m.tif
+```{r}
+NA.2020 <- rast("spatial_predictors/land_cover_2020v2_30m_tif/NA_NALCMS_landcover_2020v2_30m/data/NA_NALCMS_landcover_2020v2_30m.tif")
+res(NA.2020)
+#plot(NA.2020)
+
+NA.2010 <- rast("spatial_predictors/land_cover_2010v3_30m_tif/NA_NALCMS_landcover_2010v3_30m/data/NA_NALCMS_landcover_2010v3_30m.tif")
+res(NA.2010)
+#plot(NA.2010)
+#plot(NA.2020)
+```
+
+## Land Cover Change
+```{r}
+lc.cropland <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m.tif")
+lc.wetland <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_wetland_gain_loss_2015v4_2020v2_30m.tif")
+lc.barren <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_barrenland_gain_loss_2015v4_2020v2_30m.tif")
+lc.water <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_water_gain_loss_2015v4_2020v2_30m.tif")
+```
+
+## Temp Change
+```{r}
+install.packages("ncdf4")
+library(ncdf4)
+
+# 1) point these to the TerraClimate NetCDF file containing monthly tmean (example filename)
+#    Replace with the actual path or URL you downloaded.
+ncfile <- "spatial_predictors/TerraClimate_tmax_2012.nc"
+r <- rast(ncfile)
+r2012 <- r$tmax_6
+
+ncfile <- "spatial_predictors/TerraClimate_tmax_2022.nc"
+r <- rast(ncfile)
+r2022 <- r$tmax_6
+
+ann2012 <- app(r2012, mean, na.rm=TRUE)
+ann2022 <- app(r2022, mean, na.rm=TRUE)
+
+delta <- ann2022 - ann2012
+
+na_bbox <- ext(-170, -50, 5, 85)
+delta_na <- crop(delta, na_bbox)
+
+writeRaster(delta_na, "tmean_2022_minus_2012_NA.tif", overwrite=TRUE)
+
+plot(delta_na, main="Mean annual T (2022) − Mean annual T (2012) (°C)")
+```
+
+# BANS decline
+```{r}
+library(ebirdst)
+library(fields)
+library(rnaturalearth)
+
+#set_ebirdst_access_key("e85tlh4u295h")
+ebirdst_download_trends(species = "banswa")
+
+trends_bans <- load_trends("banswa")
+
+trends_sf <- st_as_sf(trends_bans,
+                      coords=c("longitude", "latitude"),
+                      crs=4326)
+
+plot(trends_sf)
+
+trends_circles <- vectorize_trends(trends_bans,
+                                   crs = "+proj=eqearth +lon_0=-96")
+
+max_trend <- ceiling(max(abs(trends_circles$abd_trend)))
+legend_breaks <- seq(0, 40, by = 10)
+legend_breaks[length(legend_breaks)] <- max_trend
+legend_breaks <- c(-rev(legend_breaks), legend_breaks) |> unique()
+legend_labels <- c("<=-40", -20, 0, 20, ">=40")
+legend_colors <- ebirdst_palettes(length(legend_breaks) - 1, type = "trends")
+
+# assign colors to circles
+trends_circles <- trends_circles |> 
+  mutate(color = cut(abd_trend, legend_breaks, labels = legend_colors) |> 
+           as.character())
+
+countries <- ne_countries(returnclass = "sf", continent = "North America") |> 
+  st_geometry() |> 
+  st_transform(st_crs(trends_circles))
+states <- ne_states(iso_a2 = c("US", "CA", "MX")) |> 
+  st_geometry() |> 
+  st_transform(st_crs(trends_circles))
+
+# set the plotting extent
+plot(st_geometry(trends_circles), border = NA, col = NA)
+# add basemap
+plot(countries, col = "#cfcfcf", border = "#888888", add = TRUE)
+# add trends
+plot(st_geometry(trends_circles),
+     col = trends_circles$color, border = NA,
+     axes = FALSE, bty = "n", reset = FALSE, add = TRUE)
+# add boundaries
+lines(vect(countries), col = "#ffffff", lwd = 3)
+lines(vect(states), col =  "#ffffff", lwd = 1.5, xpd = TRUE)
+
+# add legend using the fields package
+# label the bottom, middle, and top
+label_breaks <- seq(0, 1, length.out = length(legend_breaks))
+image.plot(zlim = c(0, 1), breaks = label_breaks, col = legend_colors,
+           smallplot = c(0.90, 0.93, 0.15, 0.85),
+           legend.only = TRUE,
+           axis.args = list(at = c(0, 0.25, 0.5, 0.75, 1), 
+                            labels = legend_labels,
+                            col.axis = "black", fg = NA,
+                            cex.axis = 0.7, lwd.ticks = 0,
+                            line = -0.75),
+           legend.args = list(text = "Abundance Trend [% change]",
+                              side = 2, line = 0.25))
+
+
+trends_raster <- rasterize_trends(trends_bans, layers = "abd_trend")
+library(raster)
+trends_raster.proj <- project(trends_raster, "EPSG:4326")
+plot(trends_raster.proj)
+```
+
+# Splitting data up per AU
+```{r}
+genoscape <- rast("spatial_predictors/BANS_genoscape_brick.tif")
+na_bbox <- ext(-170, -50, 5, 85)
+genoscape.crop <- crop(genoscape, na_bbox)
+plot(genoscape.crop)
+
+delta_na <- rast("spatial_predictors/tmean_2022_minus_2012_NA.tif")
+```
+
+## getting temp data per AU cell...
+```{r}
+crs(delta_na) == crs(genoscape.crop)
+delta_na.proj <- terra::project(delta_na, genoscape.crop)
+crs(delta_na.proj) == crs(genoscape.crop)
+plot(delta_na.proj)
+```
+
+```{r}
+# resample to trend data as this is the biggest resolution
+delta_resamp <- resample(delta_na.proj, trends_raster.proj, method = "bilinear")
+plot(delta_resamp)
+
+genoscape_pol <- terra::as.polygons(genoscape.crop)
+# extract temp data for each cell in the genoscape, grouped by Q val
+temp_AU <- terra::extract(delta_resamp, genoscape_pol, cells = TRUE)
+```
+## land cover per AU
+```{r}
+#cropland
+lc.cropland_proj <- terra::project(lc.cropland, genoscape.crop)
+writeRaster(lc.cropland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m_projected.tif")
+
+#wetland
+lc.wetland_proj <- terra::project(lc.wetland, genoscape.crop)
+writeRaster(lc.wetland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_wetland_gain_loss_2015v4_2020v2_30m_projected.tif")
+
+#barren
+lc.barren_proj <- terra::project(lc.barren, genoscape.crop)
+writeRaster(lc.wetland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_barrenland_gain_loss_2015v4_2020v2_30m_projected.tif")
+
+lc_resamp <- resample(lc.cropland_proj, trends_raster.proj, method = "bilinear")
+plot(lc_resamp)
+
+writeRaster(lc.cropland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m_projected.tif")
+
+lc_AU <- terra::extract(lc_resamp, genoscape_pol, cells = TRUE)
+```
+
+## Getting trend data per AU
+```{r}
+trend_AU <- terra::extract(trends_raster.proj, genoscape_pol, cells=TRUE)
+```
+
+## Running the GAMM
+```{r}
+data <- left_join(trend_AU, temp_AU, by="cell") %>% left_join(lc_AU) %>% rename(group=ID.x, lc_cropland=NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m) %>% dplyr::select(group, abd_trend, mean, cell, lc_cropland) %>% write.csv("prelim_data.csv")
+data$group <- factor(data$group)
+```
+Visualizing the data.
+```{r}
+data <- read.csv("prelim_data.csv")
+data$group <- as.factor(data$group)
+
+ggplot(data %>% filter(group==3), aes(x = mean, y = abd_trend, color=group)) +
+  geom_point(size = 2, alpha = 0.7) +
+  theme_minimal() +
+  labs(x = "Temperature change", y = "Trend", color = "Group")
+
+# Add smooths (nonparametric loess just for visualization)
+ggplot(data %>% filter(group==3), aes(x = mean, y = lc_cropland, color = group)) +
+  geom_point(size = 2, alpha = 0.6) +
+  geom_smooth(method = "gam", se = TRUE) +
+  theme_minimal() +
+  labs(x = "Temperature change", y = "Trend", color = "Group")
+
+```
+Does seem like a GAM might be a good approach for groups 2 and 3. Group 1, however, is really limited datawise. I think it's worth dropping that group for now as it might mess up the overall model fit.
+
+```{r}
+data.no1 <- data %>% filter(group!=1)
+#only lost like 20 points! So, yeah, not great...
+```
+
+Now let's try and run some GAM models.
+The following model will be used, where X_y and X_z are examples of predictors. This model includes smoothing functions and interaction terms between the predictors (Wood 2017).
+
+trend ~ s(X_y)+s(X_z) + ti(X_y,X_z) 
+```{r}
+library(mgcv)
+m.test <- gam(abd_trend ~ s(mean, bs="cr"), data=data.no1)
+summary(m.test)
+plot(m.test)
+m <- gam(abd_trend ~ s(mean, k = 5) + group, data = data)
+summary(m)
+plot(m)
+m2 <- gam(abd_trend ~ s(mean, by = group, k = 10) + group, data = data.no1)
+summary(m2)
+plot(m2)
+```
+

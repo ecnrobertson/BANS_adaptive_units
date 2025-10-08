@@ -1,0 +1,357 @@
+---
+title: "Loggerhead Shrike Genoscape"
+author: "Holden"
+date: "2025-07-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "~/Desktop/BANS_adaptive_units/")
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(raster)
+library(tidyverse)
+library(sf)
+library(ggspatial)
+library(terra)
+library(ggrepel)
+library(tess3r)
+library(rnaturalearth)
+#remotes::install_github("mgdesaix/mignette")
+library(mignette)
+library(terra)
+library(lwgeom)
+```
+
+I used pcangsd --admix to generate my admixture proportions. To start, load the .Q file(s). If you did a single admixture run (not hierarchical). It's pretty easy. Load the admixture proportions and merge with a sample list you (same order as admix input).
+```{r, message=FALSE, warning=FALSE}
+# Q_tibble <- read_table2("../admix-july-25/311ind-pass-maf05-snp-miss50-scafmt10-gtglimpute4.1-exclLD50-5-0.5-admix-K4-alpha0-r1.admix.4.Q",col_names = F) %>% rename(grp1=X1, grp2=X2, grp3=X3, grp4=X4)
+# 
+# #extract sample names in order from a plink file
+# inds <- read_table("../pca/Apr-25/data/311ind-pass-maf05-snp-miss50-exclLD50-5-0.6.nosex", col_names =F) %>% rename(Sample=X1) %>% dplyr::select(-X2)
+# 
+# inds <- dplyr::select(inds, Sample)
+# 
+# # add those sample names to the q values
+# Q_tibble <- bind_cols(inds, Q_tibble)
+```
+
+I used a hierarchical admixutre approach. You might do separate admixture runs for distantly related groups if you have a big east west split, or in my case isolated island populations (channel islands) that have little gene flow with the mainland populations. For the first run, pad the admixture proportions on populations in the second run with zeros and vice-versa. Then comnbine.
+```{r, message=FALSE, warning=FALSE}
+q7 <- read.table("../admix-july-25/310to7ind-pass-maf05-snp-miss80-gtglimpute4.1-exclLD2.5-1-0.7-admix-K2-alpha1-r1.admix.2.Q")
+q303 <- read.table("../admix-july-25/310to303ind-pass-maf05-snp-miss80-gtglimpute4.1-exclLD2.5-1-0.7-admix-K3-alpha1-r1.admix.3.Q")
+
+ind_7 <- read_table("../pca/Apr-25/sample_list_7.txt", col_names = F) %>% rename(Sample=X1)
+ind_303 <- read_table("../pca/Apr-25/sample_list_303.txt", col_names = F) %>% rename(Sample=X1)
+
+q7_padded <- q7 %>%
+  mutate(V3 = 0, V4 = 0, V5 = 0) %>% 
+  mutate(Sample = ind_7$Sample) %>% 
+  dplyr::select(Sample, V1, V2, V3, V4, V5)
+
+
+q303_padded <- q303 %>% rename(V3 = V1, V4 = V2, V5 = V3) %>%
+  mutate(V1 = 0, V2 = 0) %>% 
+  mutate(Sample = ind_303$Sample) %>% 
+  dplyr::select(Sample, V1, V2, V3, V4, V5)
+
+Q_tibble <- bind_rows(q7_padded, q303_padded) %>% rename(grp1=V1, grp2=V2, grp3=V3, grp4=V4, grp5=V5) #%>% 
+#dplyr::select(-Sample) %>% 
+#write.table("../admix-july-25/310to303ind-pass-maf05-snp-miss80-gtglimpute4.1-exclLD2.5-1-0.7-admix-hier-K5-alpha1.admix.Q", quote = F, row.names = F, col.names = F)
+
+inds <- Q_tibble %>% dplyr::select(Sample)
+```
+
+Now we can make the genoscape.
+```{r, message=FALSE, warning=FALSE}
+meta <- read.csv("../pca/Apr-25/data/LOSH Master - Library Master.csv") %>%
+  dplyr::select(-c(Picogreen_ng_ul, BandQuality, ReRunPlateName, ReRunPlatePosition)) %>%
+  filter(BGP_ID %in% inds$Sample) %>%
+  distinct(BGP_ID, .keep_all = TRUE) %>%
+  mutate(Region_site=paste(State, Lat, Long, sep="_"), Region_pop=State) %>%
+  # split TX gulf and TX North into separate pops
+  mutate(
+    Region_pop = State,
+    Region_pop = ifelse(State == "TX" & substr(Long, 1, 4) == "-96.", "TX(gulf)", 
+                        ifelse(State == "TX", "TX(inland)", Region_pop))) %>%
+  # define Santa Catalina Isl
+  mutate(Region_pop = case_when(
+    Region_site == "CA_33.4016382_-118.44738" ~ "Santa Catalina Isl",
+    TRUE ~ Region_pop)) %>%
+  # define San Diego
+  mutate(Region_pop = ifelse(grepl("San Diego", CityTown, ignore.case = TRUE),
+                             "San Diego", Region_pop)) %>%
+  # define San Clemente Isl
+  mutate(Region_pop = if_else(str_detect(CityTown, regex("San Clemente", ignore_case = TRUE)),
+                              "San Clemente Isl", Region_pop)) %>%
+  # this one bird from CA is also from San Clemente
+  mutate(Region_pop = case_when(
+    Region_site == "CA_32.908_-118.502" ~ "San Clemente Isl",
+    TRUE ~ Region_pop)) %>% 
+  # lump Tlaxcala with Mexico City (very close) and translate Distrito Federal to Mexico City
+  mutate(Region_pop = case_when(
+    Region_pop %in% c("Tlaxcala", "Distrito Federal") ~ "Mexico City",
+    TRUE ~ Region_pop)) %>% 
+  mutate(
+    Lat = if_else(BGP_ID == "22N13856", 37.1057, Lat),
+    Long = if_else(BGP_ID == "22N13856", -80.6853, Long)
+  )
+
+LatLong_tibble <- Q_tibble %>%
+  dplyr::select(Sample) %>%
+  left_join(meta, by = c("Sample" = "BGP_ID")) %>%
+  dplyr::select(Sample, Lat, Long)
+
+
+# set cluster colors
+cluster_colors <-  c(
+  grp5 = "#8DA0CBFF",
+  grp3 = "#FFD92FFF",
+  grp4 = "#66C2A5FF",
+  grp2 = "#FF4500",
+  grp1 = "#C51B8A"
+)
+
+# load breeding range
+breeding_range <- st_read("/Users/holdenfox/Desktop/shrike-gen/meta/logshr_range_2022/logshr_range_2022.gpkg", quiet = TRUE) %>%
+  filter(season == "breeding")
+
+# prepare the data for tess3Q_map_rasters
+long_lat_tibble <- Q_tibble %>%
+  dplyr::select(Sample) %>%
+  left_join(LatLong_tibble, by = "Sample") %>%
+  dplyr::select(Long, Lat) 
+
+long_lat_matrix <- long_lat_tibble %>%
+  as.matrix()
+
+# make a matrix of Q values
+Q_matrix <- Q_tibble %>%
+  dplyr::select(-Sample) %>%
+  as.matrix()
+
+# interpolate the Q-values by kriging using tess3r::tess3Q_map_rasters()
+genoscape_brick <- tess3r::tess3Q_map_rasters(
+  x = Q_matrix, 
+  coord = long_lat_matrix,  
+  map.polygon = breeding_range,
+  window = extent(breeding_range)[1:4],
+  resolution = c(1000,1000), # if you want more cells in your raster, set higher
+  # this next lines need to to be here, but don't do much...
+  col.palette = tess3r::CreatePalette(cluster_colors, length(cluster_colors)), 
+  method = "map.max", 
+  interpol = tess3r::FieldsKrigModel(10),  
+  main = "Ancestry coefficients",
+  xlab = "Longitude", 
+  ylab = "Latitude", 
+  cex = .4
+)
+
+# after that, we need to add names of the clusters back onto this raster brick
+names(genoscape_brick) <- names(Q_tibble)[-1]
+
+# scaling and cleaning the genoscape_brick
+genoscape_rgba <- genoscapeRtools::qprob_rando_raster(
+  TRB = genoscape_brick,
+  cols = cluster_colors, 
+  alpha_scale = 2.0, 
+  abs_thresh = 0.0, 
+  alpha_exp = 1.55, 
+  alpha_chop_max = 230
+)
+
+# at this point, we must be explicit about adding a projection to the raster.
+# this adds the info for a regular lat-long projection
+crs(genoscape_rgba) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# get shapefiles from natural earth
+coastlines <- ne_download(scale = 10, type = "coastline", category = "physical", returnclass = "sf")
+countries <- ne_download(scale = 10, type = "admin_0_boundary_lines_land", category = "cultural", returnclass = "sf")
+states <- ne_download(scale = 10, type = "admin_1_states_provinces_lines", category = "cultural", returnclass = "sf")
+ocean <- ne_download(scale = 10, type = "ocean", category = "physical", returnclass = "sf")
+lakes <- ne_download(scale = 10, type = "lakes", category = "physical", returnclass = "sf")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# reproject to a Lambert conic projection
+lamproj <- "+proj=lcc +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-100 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+genoscape_spat <- rast(genoscape_rgba)
+genoscape_projected <- terra::project(genoscape_spat, lamproj, method = "near")
+
+# plot it
+genoscape <- ggplot() +
+  ggspatial::layer_spatial(genoscape_projected) +
+  geom_sf(data = breeding_range, fill = NA, linewidth = 0.1225 , alpha = 0.6) +
+  geom_sf(data = countries, fill = NA, linewidth = 0.25) +
+  geom_sf(data = coastlines, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = states, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = ocean, fill = "#bddbe6") +
+  geom_sf(data = lakes, fill = "#bddbe6") +
+  geom_spatial_point(data = long_lat_tibble, mapping = aes(x = Long, y = Lat), size=1, alpha = 0.7) + 
+  theme_void() + 
+  theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 1)) +
+  coord_sf(
+    crs = st_crs(lamproj), 
+    xlim = c(-4000000, 3400000), 
+    ylim = c(-3000000, 3000000),
+    expand = FALSE)  # expand = FALSE means put the axes right at the xlim and ylim
+
+genoscape
+
+ontario <- ggplot() +
+  ggspatial::layer_spatial(genoscape_projected) +
+  geom_sf(data = breeding_range, fill = NA, linewidth = 0.1225 , alpha = 0.6) +
+  geom_sf(data = countries, fill = NA, linewidth = 0.25) +
+  geom_sf(data = coastlines, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = states, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = ocean, fill = "#bddbe6") +
+  geom_sf(data = lakes, fill = "#bddbe6") +
+  #geom_spatial_point(data = long_lat_tibble, mapping = aes(x = Long, y = Lat), size=2) + 
+  theme_void() + 
+  theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 1)) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA), 
+    plot.background  = element_rect(fill = "white", color = NA)
+  ) +
+  coord_sf(
+    crs = st_crs(lamproj), 
+    xlim = c(1350000, 1750000), 
+    ylim = c(0500000, 0850000),
+    expand = FALSE)  # expand = FALSE means put the axes right at the xlim and ylim
+
+ontario
+
+channel_isl <- ggplot() +
+  ggspatial::layer_spatial(genoscape_projected) +
+  geom_sf(data = breeding_range, fill = NA, linewidth = 0.1225 , alpha = 0.6) +
+  geom_sf(data = countries, fill = NA, linewidth = 0.25) +
+  geom_sf(data = coastlines, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = states, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = ocean, fill = "#bddbe6") +
+  geom_sf(data = lakes, fill = "#bddbe6") +
+  #geom_spatial_point(data = long_lat_tibble, mapping = aes(x = Long, y = Lat), size=2) + 
+  theme_void() + 
+  theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 1)) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA), 
+    plot.background  = element_rect(fill = "white", color = NA)
+  ) +
+  coord_sf(
+    crs = st_crs(lamproj),
+    xlim = c(-1800000, -1500000), 
+    ylim = c(-0700000, -0350000),
+    expand = FALSE)  # expand = FALSE means put the axes right at the xlim and ylim
+
+channel_isl
+
+
+library(cowplot)
+
+genoscape_boxed <- genoscape +
+  geom_rect(aes(xmin = 1350000, xmax = 1750000, ymin = 500000, ymax = 850000),
+            color = "red", fill = NA, linewidth = 0.5) +  # Ontario box
+  geom_rect(aes(xmin = -1800000, xmax = -1500000, ymin = -700000, ymax = -350000),
+            color = "red", fill = NA, linewidth = 0.5) 
+
+final_map <- ggdraw() +
+  draw_plot(genoscape_boxed) +  # main map
+  draw_plot(ontario, x = 0.65, y = 0.65, width = 0.3, height = 0.3) +  # inset Ontario
+  draw_plot(channel_isl, x = 0.00, y = 0.00, width = 0.4, height = 0.4) # inset Channel Islands
+
+final_map
+
+ggsave("LOSH_genoscape_insets.svg", final_map)
+``` 
+
+```{r, message=FALSE, warning=FALSE}
+library(pophelper)
+Q <- readQ("../admix-july-25/311ind-pass-maf05-snp-miss50-scafmt10-gtglimpute4.1-exclLD50-5-0.5-admix-K4-alpha0-r1.admix.4.Q")
+
+
+```
+I want to create shapefiles for each genetic group to get demographic data for, either from ebird population trends or BBS. Matt has function for this in Mignette, so install and load that package if you haven't already.
+```{r, message = FALSE, warning = FALSE}
+# terra::writeRaster(
+#   genoscape_brick,
+#   filename = "LOSH.genoscape_rgba.tif",
+#   filetype = "GTiff",
+#   overwrite = TRUE
+# )
+
+crs(genoscape_brick) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+genoscape_brick_spat <- rast(genoscape_brick)
+genoscape_brick_proj <- terra::project(genoscape_brick_spat, lamproj, method = "near")
+
+genoscape_polygons <- mignette::scape_to_shape(x = genoscape_brick_proj, 
+                                               prob_threshold = 0.5,
+                                               d = 100,
+                                               f = 100,
+                                               s = 3)
+
+polygons <- ggplot() +
+  ggspatial::layer_spatial(genoscape_polygons, aes(fill = as.factor(Cluster))) +
+  #geom_sf(data = breeding_range, fill = NA, linewidth = 0.1225 , alpha = 0.6) +
+  geom_sf(data = countries, fill = NA, linewidth = 0.25) +
+  geom_sf(data = coastlines, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = states, fill = NA, linewidth = 0.1225) +
+  #geom_sf(data = ocean, fill = "#bddbe6") +
+  #geom_sf(data = lakes, fill = "#bddbe6") +
+  #geom_spatial_point(data = long_lat_tibble, mapping = aes(x = Long, y = Lat), size=2) +
+  theme_void() + 
+  #theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 1)) +
+  coord_sf(
+    crs = st_crs(lamproj), 
+    xlim = c(-4000000, 3400000),
+    ylim = c(-3000000, 3000000),
+    expand = FALSE)  # expand = FALSE means put the axes right at the xlim and ylim
+
+polygons
+
+polygons_ci <- ggplot() +
+  ggspatial::layer_spatial(genoscape_polygons, aes(fill = as.factor(Cluster))) +
+  #geom_sf(data = breeding_range, fill = NA, linewidth = 0.1225 , alpha = 0.6) +
+  geom_sf(data = countries, fill = NA, linewidth = 0.25) +
+  geom_sf(data = coastlines, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = states, fill = NA, linewidth = 0.1225) +
+  #geom_sf(data = ocean, fill = "#bddbe6") +
+  #geom_sf(data = lakes, fill = "#bddbe6") +
+  #geom_spatial_point(data = long_lat_tibble, mapping = aes(x = Long, y = Lat), size=2) +
+  theme_void() + 
+  #theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 1)) +
+  coord_sf(
+    crs = st_crs(lamproj), 
+    # xlim = c(-4000000, 3400000), 
+    # ylim = c(-3000000, 3000000),
+    xlim = c(-1800000, -1500000), 
+    ylim = c(-0700000, -0350000),
+    expand = FALSE)  # expand = FALSE means put the axes right at the xlim and ylim
+
+polygons_ci
+
+polygons_on <- ggplot() +
+  ggspatial::layer_spatial(genoscape_polygons, aes(fill = as.factor(Cluster))) +
+  #geom_sf(data = breeding_range, fill = NA, linewidth = 0.1225 , alpha = 0.6) +
+  geom_sf(data = countries, fill = NA, linewidth = 0.25) +
+  geom_sf(data = coastlines, fill = NA, linewidth = 0.1225) +
+  geom_sf(data = states, fill = NA, linewidth = 0.1225) +
+  #geom_sf(data = ocean, fill = "#bddbe6") +
+  #geom_sf(data = lakes, fill = "#bddbe6") +
+  #geom_spatial_point(data = long_lat_tibble, mapping = aes(x = Long, y = Lat), size=2) +
+  theme_void() + 
+  #theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 1)) +
+  coord_sf(
+    crs = st_crs(lamproj),
+    xlim = c(1350000, 1750000), 
+    ylim = c(0500000, 0850000),
+    expand = FALSE)  # expand = FALSE means put the axes right at the xlim and ylim
+
+polygons_on
+ggsave("LOSH_genoscape_polygons.svg", polygons, width = 8, height = 6, dpi = 300)
+
+st_write(genoscape_polygons, "LOSH_genoscape_polygons.shp", delete_layer = TRUE)
+
+```

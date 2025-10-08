@@ -1,0 +1,25 @@
+---
+title: "06.1.GF_offset"
+output: html_document
+author: "Erica Robertson"
+date: "2025-10-03"
+---
+
+Adapted from Holden's Code
+
+# INTRODUCTION
+The goal here is to run a genomic offset analysis using the Gradient Forest (GF) method. GF will be used to model nonlinear genotype-environment relationships, then that will be projected onto current and future climate rasters (in a spatial approach) to estimate genomic offset (vulnerability). This is following the original genomic offset method set forth by Fitzpatrick & Keller 2015.
+
+The pipeline has five stages:
+1. Prepare environmental data
+2. Prepare genotype–environment model (Gradient Forest)
+3. Project GF predictions spatially (current climate)
+4. Project under future climate scenarios
+5. Compute genomic offset (Euclidean distance between predictions)
+6. Smooth and visualize offset maps
+
+# 1. Prepare Environmental Data
+So here we have to manage both current data and future, projected data. We are also going to need to randomly pull spatial points across the study area to serve as a background. A couple things
+
+## current data
+L

@@ -1,0 +1,306 @@
+---
+title: "04.1.structure"
+output: html_document
+---
+# Pulling out Significant SNPs
+So, we've run an RDA and identified candidate SNPs. Initially, just running this on the small 10,000 set so the later steps on this might not work super well but I just want the code to be working before I go through this will everything.
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/ind.rda.env_memp.uncor.cand.snps_update.txt /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/04.delineate_AUs
+```
+
+```{r}
+cand <- read.table("ind.rda.env_memp.uncor.cand.snps_update.txt", header=T)
+nrow(cand)
+```
+
+So, we've got 97 SNPs. We need to go back to our original, LD filtered .vcf and isolate these to run the PCA and ADMIXTURE on. To do this, let's tidy up our snplist.
+
+```{r}
+# Start with your candidate SNPs
+cand_snps <- cand$snp
+
+# Remove the trailing allele part (_A, _C, _G, _T)
+snp_list <- gsub("_[ACGT]$", "", cand_snps)
+
+# Optionally, make sure they are unique
+snp_list <- unique(snp_list)
+
+# Write to a file for bcftools
+writeLines(snp_list, "cand_snps.txt")
+```
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/04.delineate_AUs/cand_snps.txt ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/04.delineate_AUs
+```
+
+```{bash}
+conda activate bioinf
+bcftools view -i ID=@cand_snps.txt \
+  ../03.GEA/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.vcf.gz \
+  -Oz -o BANS.cand_snps.vcf.gz
+
+# Index the new VCF
+tabix -p vcf BANS.cand_snps.vcf.gz
+```
+## Principal Component Analysis
+```{bash}
+conda activate GWAS2
+plink -vcf BANS.cand_snps.vcf.gz --aec --recode --out BANS.cand_snps_update
+
+plink --file BANS.cand_snps_update \
+--make-bed --aec \
+--out BANS.cand_snps_update
+```
+
+```{bash}
+plink --bfile BANS.cand_snps_update --aec --set-missing-var-ids @:# --pca 96 --out BANS.cand_snps_update
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/04.delineate_AUs/*update.eigen* /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/04.delineate_AUs
+```
+
+##Time to plot the PCA.
+```{r}
+library(tidyverse)
+library(dplyr)
+plink_pca <- read.table("BANS.cand_snps_update.eigenvec", header = FALSE) %>% dplyr::select(-V2)
+eigenval <- scan("BANS.cand_snps_update.eigenval")
+
+# set names
+pca05 <- plink_pca
+colnames(pca05)[-1] <- paste0("PC", 1:(ncol(pca05) - 1))
+names(pca05)[1] <- "ind"
+nrow(pca05)
+#correct number of samples
+
+id.loc <- read.csv("../../data/BANS_sample_data.csv")
+
+loc <- data.frame(as.factor(id.loc$BGP.ID), id.loc$Location)
+colnames(loc) <- c("ind", "site")
+pca05 <- left_join(pca05, loc, by="ind")
+pca05$spp <- "BANS"
+spp <- pca05$spp
+pca05 <- pca05 %>% dplyr::select(spp, ind, site, everything())
+
+# combine - if you want to plot each in different colours
+spp_loc <- paste0("BANS", "_", pca05$site)
+
+pca05 <- as_tibble(data.frame(pca05, spp_loc))
+```
+
+```{r}
+pve05 <- data.frame(PC = 1:96, pve = eigenval/sum(eigenval)*100)
+
+
+# make plot
+a05 <- ggplot(pve05, aes(PC, pve)) + geom_bar(stat = "identity")
+a05 + ylab("Percentage variance explained") + theme_light()
+
+b05 <- ggplot(pca05, aes(PC1, PC2, col = site))+
+  geom_point(size = 3)+
+  scale_color_manual(values = scales::hue_pal()(15))+
+  coord_equal() + theme_light()+
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+b05
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+
+# Read pops
+pops <- read.table(file = "../03.GEA/BANS_sample_list_pop.tsv", sep="\t", header = FALSE)  %>%
+  rename(ind = V1, Cluster = V3) %>%
+  dplyr::select(ind, Cluster)
+
+# Join PCA data
+pca.cluster <- left_join(pca05, pops, by="ind")  # left_join PCA first to preserve PC columns
+
+# Factor for cluster order
+region_order <- c(
+  "Cluster_1", "Cluster_5", 
+  "Cluster_4", "Cluster_8", "Cluster_12", "Cluster_2", "Cluster_3", "Cluster_7",
+  "Cluster_11", "Cluster_14", "Cluster_13", "Cluster_6", "Cluster_9", "Cluster_10"
+)
+pca.cluster$Cluster <- factor(pca.cluster$Cluster, levels = region_order)
+
+# Define clusters by region
+West_clusters    <- c("Cluster_1", "Cluster_5")
+Midwest_clusters <- c("Cluster_4", "Cluster_8", "Cluster_12", "Cluster_2", "Cluster_3", "Cluster_7")
+East_clusters    <- c("Cluster_11", "Cluster_14", "Cluster_13", "Cluster_6", "Cluster_9", "Cluster_10")
+
+# Assign colors by cluster
+W.cols <- setNames(brewer.pal(n = length(West_clusters), "Reds"), West_clusters)
+Midwest.cols <- setNames(brewer.pal(n = length(Midwest_clusters), "Blues"), Midwest_clusters)
+E.cols <- setNames(brewer.pal(n = length(East_clusters), "Greens"), East_clusters)
+bg <- c(W.cols, Midwest.cols, E.cols)
+
+# Plot
+b05 <- ggplot(pca.cluster, aes(PC1, PC2, col = Cluster)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  coord_equal() + 
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+b05
+
+ggsave("BANS_PCA_update.png", width=8)
+
+```
+
+# ADMIXTURE
+ADMIXTURE does not accept chromosome names that are not human chromosomes. We will thus just exchange the first column by 0
+
+```{bash}
+awk '{$1="0";print $0}' BANS.cand_snps.bim > BANS.cand_snps.bim.tmp
+mv BANS.cand_snps.bim.tmp BANS.cand_snps.bim
+```
+
+Running admixture with k=1-3
+
+```{bash, label="bash"}
+conda activate GWAS2
+admixture --cv BANS.cand_snps.bed 1 > BANS.cand_snps.log1.out
+
+admixture --cv BANS.cand_snps.bed 2 > BANS.cand_snps.log2.out
+
+admixture --cv BANS.cand_snps.bed 3 > BANS.cand_snps.log3.out
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/04.delineate_AUs/*.Q /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/04.delineate_AUs
+```
+
+To identify the best value of k clusters which is the value with lowest cross-validation error, we need to collect the cv errors. 
+
+```{bash}
+awk '/CV/ {print $3,$4}' *out | cut -c 4,7-20 > BANS.cv.error
+```
+1 0.50344
+2 0.49529
+3 0.49209
+
+So based on this, k=3 is the best. This is a bummer.
+
+```{r}
+samplelist <- pca05$ind
+
+all_data <- tibble(sample=character(),
+                   k=numeric(),
+                   Q=character(),
+                   value=numeric())
+
+for (k in 1:3){
+    data <- read_delim(paste0("BANS.cand_snps.",k,".Q"),
+                       col_names = paste0("Q",seq(1:k)),
+                       delim=" ")
+    data$sample <- samplelist
+    data$k <- k
+    
+    #This step converts from wide to long.
+    data %>% gather(Q, value, -sample,-k) -> data
+    all_data <- rbind(all_data,data)
+}
+
+head(all_data)
+
+ADMIX_plot <- all_data %>%
+  filter(k == 3) %>%
+  ggplot(.,aes(x=sample,y=value,fill=factor(Q))) + 
+  geom_bar(stat="identity",position="stack") +
+  xlab("Sample") + ylab("Ancestry") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  scale_fill_brewer(palette="Set1",name="K",
+                    labels=c("1","2","3"))
+ggsave("BANS_ADMIX.png",width = 10)
+ggplotly(ADMIX_plot)
+```
+
+
+
+```{r}
+all_k <- all_data %>%
+  ggplot(aes(x = sample, y = value, fill = factor(Q))) + 
+  geom_bar(stat = "identity", position = "stack") +
+  xlab("Sample") + ylab("Ancestry") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 5)) +  # Adjust size here
+  scale_fill_brewer(palette = "Set1", name = "K", labels = seq(1:5)) +
+  facet_wrap(~k, ncol = 1)
+
+ggplotly(all_k)
+```
+
+# Assigning To AU
+## Based on threshold of admixture
+```{r}
+meta <- read.csv(file = "../../data/BANS_sample_data.csv") %>% dplyr::select(BGP.ID, Country_code, State, Location, Lat, Long) %>% rename(BGP_ID=BGP.ID)
+
+
+meta <- left_join(meta, pop, by="BGP_ID")
+
+# qmat: data.frame or matrix with columns K1, K2, ..., rows matching pca_df order
+# Example: load qmat
+qmat <- read.table("BANS.cand_snps.3.Q")  # adjust path
+
+# Assign to cluster with max Q, optionally require threshold
+maxQ <- apply(qmat, 1, max)
+assign_by_max <- apply(qmat, 1, which.max)  # integer cluster index
+
+# set threshold for "pure" assignment
+threshold <- 0.5
+AU_admix <- ifelse(maxQ >= threshold, paste0("AU", assign_by_max), "admixed")
+
+pca_df <- read.table("BANS.cand_snps.eigenvec", header = FALSE) %>% dplyr::select(-V2)
+colnames(pca_df)[-1] <- paste0("PC", 1:(ncol(pca_df) - 1))
+names(pca_df)[1] <- "ind"
+
+pca_df$AU_admix <- factor(AU_admix, levels = unique(AU_admix))
+
+pve <- data.frame(PC = 1:96, pve = eigenval/sum(eigenval)*100)
+
+
+# make plot
+a05 <- ggplot(pve, aes(PC, pve)) + geom_bar(stat = "identity")
+a05 + ylab("Percentage variance explained") + theme_light()
+
+# plot to compare with PCA
+au.plot <- ggplot(pca_df, aes(PC1, PC2, col = AU_admix))+
+  geom_point(size = 3)+
+  scale_color_manual(values = scales::hue_pal()(15))+
+  coord_equal() + theme_light()+
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+ggplotly(au.plot)
+```
+
+##based on PCA clustering
+```{r}
+# run hierarchical clustering on PC1 and PC2
+dist_mat <- dist(pca_df[, c("PC1", "PC2")])        # distance matrix
+hc <- hclust(dist_mat, method = "ward.D2")        # clustering
+
+# choose number of clusters (try different k)
+k <- 3
+pca_df$cluster <- factor(cutree(hc, k = k))        # assign cluster labels
+
+# plot PCA colored by clusters
+b05_clustered <- ggplot(pca_df, aes(PC1, PC2, col = cluster)) +
+  geom_point(size = 3) +
+  coord_equal() +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)")) +
+  scale_color_manual(values = scales::hue_pal()(k))
+
+b05_clustered
+
+pca_df %>% dplyr::select(ind, cluster) %>% rename(AU=cluster, BGP_ID=ind) %>% write.csv("BANS_AUgrouping.csv")
+
+```

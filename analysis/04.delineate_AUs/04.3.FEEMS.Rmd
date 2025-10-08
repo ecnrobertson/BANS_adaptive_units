@@ -1,0 +1,12 @@
+---
+title: "04.3.EEMS"
+author: "Erica Robertson"
+date: "2025-09-18"
+output: html_document
+---
+
+Implementing FEEMS on my BANS data to visualize signals of IBD across the landscape. This will be helpful for thinking about how genes are flowing in the larger AU that spreads across Canada, and potentially also help figure out why the WA and Nova Scotia AU's are popping out so differently. 
+
+# Installing FEEMS
+
+
