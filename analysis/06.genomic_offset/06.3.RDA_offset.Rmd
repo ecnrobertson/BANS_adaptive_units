@@ -1,0 +1,22 @@
+---
+title: "06.3.RDA_offset"
+author: "Erica Robertson"
+date: "2025-10-22"
+output: html_document
+---
+
+So, after reading the Lind and Lotterhos 2024 paper "The accuracy" where they did some simulation of different offset models, the Ruegg lab has come to a conclusion about changing the way we do genomic offset.
+
+For environmental variables:
+1. when possible, biologically informed variables are good
+2. in cases when that's not possible, we will try RDA uncorrected forward selection to get variables
+Key here is that we're not going to correct for population structure when doing variable selection because the correction may remove important environmental variables.
+
+For genomic offset:
+1. using all SNPs, not just the adaptive ones. Multiple papers have shown that using all SNPs doesn't make a big different compared to adaptive, and sometimes is better.
+2. We will use the RDAoffset method within the Vegan package and correct for population structure to perform the offset metric.
+This method performed the most consistently well across different scenarios in the Lind and Lotterhos paper.
+
+
+
+

@@ -68,7 +68,7 @@ library(ebirdst)
 library(fields)
 library(rnaturalearth)
 
-#set_ebirdst_access_key("e85tlh4u295h")
+set_ebirdst_access_key("srtemkuj2h9h", overwrite=T)
 ebirdst_download_trends(species = "banswa")
 
 trends_bans <- load_trends("banswa")
@@ -132,6 +132,8 @@ trends_raster <- rasterize_trends(trends_bans, layers = "abd_trend")
 library(raster)
 trends_raster.proj <- project(trends_raster, "EPSG:4326")
 plot(trends_raster.proj)
+
+trends.df <- as.data.frame(trends_raster.proj, xy=T)
 ```
 
 # Splitting data up per AU
@@ -178,8 +180,6 @@ writeRaster(lc.wetland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_t
 lc_resamp <- resample(lc.cropland_proj, trends_raster.proj, method = "bilinear")
 plot(lc_resamp)
 
-writeRaster(lc.cropland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m_projected.tif")
-
 lc_AU <- terra::extract(lc_resamp, genoscape_pol, cells = TRUE)
 ```
 
@@ -188,50 +188,8 @@ lc_AU <- terra::extract(lc_resamp, genoscape_pol, cells = TRUE)
 trend_AU <- terra::extract(trends_raster.proj, genoscape_pol, cells=TRUE)
 ```
 
-## Running the GAMM
+# Writing Final Data
 ```{r}
 data <- left_join(trend_AU, temp_AU, by="cell") %>% left_join(lc_AU) %>% rename(group=ID.x, lc_cropland=NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m) %>% dplyr::select(group, abd_trend, mean, cell, lc_cropland) %>% write.csv("prelim_data.csv")
-data$group <- factor(data$group)
-```
-Visualizing the data.
-```{r}
-data <- read.csv("prelim_data.csv")
-data$group <- as.factor(data$group)
-
-ggplot(data %>% filter(group==3), aes(x = mean, y = abd_trend, color=group)) +
-  geom_point(size = 2, alpha = 0.7) +
-  theme_minimal() +
-  labs(x = "Temperature change", y = "Trend", color = "Group")
-
-# Add smooths (nonparametric loess just for visualization)
-ggplot(data %>% filter(group==3), aes(x = mean, y = lc_cropland, color = group)) +
-  geom_point(size = 2, alpha = 0.6) +
-  geom_smooth(method = "gam", se = TRUE) +
-  theme_minimal() +
-  labs(x = "Temperature change", y = "Trend", color = "Group")
-
-```
-Does seem like a GAM might be a good approach for groups 2 and 3. Group 1, however, is really limited datawise. I think it's worth dropping that group for now as it might mess up the overall model fit.
-
-```{r}
-data.no1 <- data %>% filter(group!=1)
-#only lost like 20 points! So, yeah, not great...
-```
-
-Now let's try and run some GAM models.
-The following model will be used, where X_y and X_z are examples of predictors. This model includes smoothing functions and interaction terms between the predictors (Wood 2017).
-
-trend ~ s(X_y)+s(X_z) + ti(X_y,X_z) 
-```{r}
-library(mgcv)
-m.test <- gam(abd_trend ~ s(mean, bs="cr"), data=data.no1)
-summary(m.test)
-plot(m.test)
-m <- gam(abd_trend ~ s(mean, k = 5) + group, data = data)
-summary(m)
-plot(m)
-m2 <- gam(abd_trend ~ s(mean, by = group, k = 10) + group, data = data.no1)
-summary(m2)
-plot(m2)
 ```
 

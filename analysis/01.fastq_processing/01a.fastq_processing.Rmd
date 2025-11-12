@@ -47,3 +47,535 @@ java -Xss5m -Xmx90g -jar $BEAGLE_JAR \
   nthreads=48
 
 ```
+
+# RUNNING ALL THE DATA TOGETHER
+## getting snakemake installed
+Going to be setting up a snakemake run using https://github.com/foxholden/mega-non-model-wgs-snakeflow
+
+```{bash}
+#within the 01.fastq_processing
+git clone https://github.com/foxholden/mega-non-model-wgs-snakeflow
+cd mega-non-model-wgs-snakeflow
+#want the Holden's latest version, so switching to that branch
+git switch LOSH-Apr-25
+
+#install executer 
+
+#going to set up a snakemake 7.7.0 version
+conda activate base
+mamba create -c conda-forge -c bioconda -n snakemake-8.20.4 snakemake=8.20.4
+conda activate snakemake-8.20.4
+
+#need this extra add on to make this work
+pip install snakemake-executor-plugin-cluster-generic
+```
+
+## getting the 2024 .bams and .gvcf over
+
+```{r}
+rclone copy -P --tpslimit 10 --fast-list SharePoint:/Genetic_and_Environmental_Data/Species_genetic_data/BANS/snakemake-results-May2024/bqsr-round-0/overlap_clipped/ /scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0
+
+rsync -avzP 
+
+```
+
+## creating units files
+
+First we need the file paths to the 2025 data set.
+```{bash}
+ls -l raw_data/01.RawData_2025/B*/*.gz > BANS_25_fastq_listings.txt
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/BANS_25_fastq_listings.txt /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/snakemake
+```
+
+Then we're going to make that into the first part of our units file.
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+files <- read_table("snakemake/BANS_25_fastq_listings.txt", col_names = FALSE) %>%
+  dplyr::select(X8, X4) %>%
+  mutate(kb = X4/1000) %>%
+  rename(fq = X8) %>%
+  dplyr::select(fq, kb) %>%
+  mutate(base = basename(fq)) %>%
+  mutate(
+    sample_id = case_when(
+            str_detect(base, "\\.fq\\.gz") ~ str_match(base, "^B_(.*)_[12]\\.fq\\.gz")[,2],
+      str_detect(base, "\\.fastq\\.gz") ~ str_match(base, "^(.*)_S[0-9]+.*\\.fastq\\.gz")[,2],
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  mutate(
+    read = case_when(
+      str_detect(base, "\\.fq\\.gz") ~ str_match(base, "B*_([12])\\.fq\\.gz")[,2],
+      str_detect(base, "\\.fastq\\.gz") ~ str_match(base, "L*_R([12])_001*\\.fastq\\.gz")[,2],
+      TRUE ~ NA_character_
+    )
+  ) 
+files
+```
+
+Now, because the naming of the files does not always have the lane, etc., and we want to machine name (not really necessary, but we can get it easily from the first line of each file), I make a file that has that info that we can join onto the path:
+```{bash}
+for i in  raw_data/01.RawData_2025/B*/*fq.gz; do zcat $i | awk -v f=$i 'BEGIN {OFS="\t"} NR==1 {print f, $1; exit}'; done | awk '!/Undetermined/' > BANS_2025_seq-tags-per-path.tsv
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/BANS_2025_seq-tags-per-path.tsv /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/snakemake
+
+```
+
+And we can make it nice like this:
+```{r}
+seq_ids <- read_tsv("snakemake/BANS_2025_seq-tags-per-path.tsv", col_names = c("fq", "id")) %>%
+  separate(
+    id, 
+    into = c("x1", "x2", "flowcell", "lane"), 
+    sep = ":", 
+    extra = "drop"
+  ) %>%
+  dplyr::select(-x1, -x2) %>%
+  mutate(platform = "ILLUMINA")
+```
+
+And we can now join those and pivot them to get fq1 fq2 kb1 and kb2 all on the same line, and then assign snakemake sample numbers to them.
+```{r}
+files_wide <- files %>%
+  left_join(seq_ids, by = "fq") %>%
+  dplyr::select(-base) %>%
+  pivot_wider(
+    values_from = c(fq, kb),
+    names_from = read,
+    names_sep = ""
+  ) %>%
+  arrange(sample_id, flowcell, lane) %>%
+  mutate(
+    sample_id = sub("_.*", "", sample_id),
+    sample = sample_id
+  )
+```
+
+We will, at the same time, add libraries to them. They were all done on Plate3 (for the 2025 group)
+
+So, now we can make our units file.  For barcodes I am just going to do the sample_id + library.  It just needs to be unique for those.
+```{r}
+units_all <- files_wide %>%
+  mutate(
+    library = "Plate3") %>%
+  group_by(sample) %>%
+  mutate(unit = 1:n(), .after = sample) %>%
+  ungroup() %>%
+  mutate(
+    barcode = str_c(sample_id, library, sep = "-")
+  ) %>%
+  dplyr::select(sample, unit, library, flowcell, platform, lane, sample_id, barcode, fq1, fq2, kb1, kb2)
+```
+
+And, finally, we write that out:
+```{r}
+write_tsv(units_all, file = "snakemake/config_files/BANS.Plate3.units.tsv")
+```
+
+### making Plate1-3 units file
+```{r}
+Plate3 <- read_delim("snakemake/config_files/BANS.Plate3.units.tsv")
+Plate12 <- read_delim("snakemake/config_files_old/BANS.Plate1.2.units.tsv")
+
+Plate1.2.3 <- rbind(Plate12, Plate3)
+write_tsv(Plate1.2.3, "snakemake/config_files/BANS.Plate1.2.3.units.tsv")
+```
+
+### Making chromosomes and scaffold groups
+
+We do this with R.  As always, it is important to look at the format
+in `.test/chromosomes.tsv` and `.test/scaffold_groups.tsv` to know the format.
+```{r}
+# as I did before, we will let anything over 30 Mb be a "chromosome" and then
+# we will shoot for scaffold groups < 50 Mb in total.
+fai <- read_tsv(
+    "snakemake/GCA_015227805.3_bHirRus1.pri.v3_genomic.fna.fai", col_names = c("chrom", "len", "x1", "x2", "x3")) %>%
+  dplyr::select(-starts_with("x")) %>%
+  mutate(cumlen = cumsum(len))
+
+# here are the lengths:
+fai %>%
+  mutate(x = 1:n()) %>%
+  ggplot(aes(x=x, y = len)) + geom_col()
+```
+Proceeding:
+```{r}
+chromos <- fai %>%
+  filter(len >= 4e6) %>%
+  rename(num_bases = len) %>%
+  dplyr::select(-cumlen)
+
+write_tsv(chromos, file = "snakemake/config_files/BARNS.chromosomes.tsv")
+
+
+# now, get the scaff groups
+scaffs <- fai %>%
+  filter(len < 4e6)
+
+bin_length <- 3e06
+
+scaff_groups <- scaffs %>%
+  mutate(
+    cumul = cumsum(len),
+    part = as.integer(cumul / bin_length) + 1L
+  ) %>%
+  mutate(
+    id = sprintf("scaff_group_%03d", part),
+    .before = chrom
+  ) %>%
+  dplyr::select(-part, -cumlen)
+
+# let's just see the total lengths of those scaff_groups
+# and also the number of scaffolds in each
+scaff_groups %>%
+  #read_delim("../scaffold_groups_new.tsv",delim="\t") %>% 
+  group_by(id) %>%
+  summarise(
+    tot_bp = sum(len),
+    num_scaff = n()
+  )
+```
+Good, that is not too many scaff groups, and also not too many scaffolds
+per any one group.
+```{r}
+write_tsv(scaff_groups, file = "snakemake/config_files/BARNS.scaffold_groups.tsv")
+```
+
+Move the config files over.
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/snakemake/config_files ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/
+```
+## Running it...
+Little things that need to be adjusted... notes about it...
+
+### notes
+
+```
+rule clip_overlaps:
+    input:
+        "results/bqsr-round-{bqsr_round}/mkdup/{sample}.bam"
+    output:
+        bam="results/bqsr-round-{bqsr_round}/overlap_clipped/{sample}.bam",
+        bai="results/bqsr-round-{bqsr_round}/overlap_clipped/{sample}.bam.bai"
+    log:
+        clip="results/bqsr-round-{bqsr_round}/logs/clip_overlaps/clip_overlap-{sample}.log",
+        index="results/bqsr-round-{bqsr_round}/logs/clip_overlaps/index-{sample}.log"
+    conda:
+        "../envs/bamutil_samtools.yaml"
+    benchmark:
+        "results/bqsr-round-{bqsr_round}/benchmarks/clip_overlaps/{sample}.bmk"
+    shell:
+        " bam clipOverlap --in {input} --out {output} --stats --poolSize 10000000 --poolSkipClip 2> {log.clip} && "
+        " samtools index {output} 2> {log.index}"
+```
+If this rule is taking a ton of memory of failing, you can up the poolSize and that might help
+
+Run the Plate3 files to g.vcf (the first gatk step), then make another Plate1-3.units.tsv with all of the individuals, get all the .g.vcfs from all individuals together, then move onto the gatk database step with everybody. Then they all go through together from there. Might need to change the date on the units file so that it's before the .g.vcf files, or touch everything so it's the same date (to avoide making snakemake thing it's an older version and everything needs to be made over).
+
+--np to test the rules
+--until whatever the rule is for the first gatk step
+
+Running the snakemake commands as a .sbatch job (snakemake_mega.sbatch), may need to do a qos=long, with a time of 48 hours.
+
+### updating things
+Updating the paths to the config files
+```{bash}
+nano example-configs/LOSH-Apr-25/config.yaml
+```
+
+units: "config_files/BANS.Plate3.units.tsv"
+chromosomes: "config_files/BARNS.chromosomes.tsv"
+scaffold_groups: "config_files/BARNS.scaffold_groups.tsv"
+scatter_intervals_file: "config_files/scatters_5000000.tsv"
+
+Adjusting the reference name information... (under ref:)
+
+Not changing the filtering right now or gatk parameters right now.
+
+Doing a test run to see what else might need to be done...
+
+```{bash}
+conda activate snakemake-8.20.4
+
+snakemake --cores 20 --use-conda  -np --configfile example-configs/LOSH-Apr-25/config.yaml
+```
+
+Job stats:
+job                                   count
+----------------------------------  -------
+all                                       1
+bcf_concat                                1
+bcf_concat_mafs                           2
+bcf_maf_section_summaries                82
+bcf_section_summaries                   123
+bung_filtered_vcfs_back_together         41
+bwa_index                                 1
+clip_overlaps                            72
+combine_bcftools_stats                    3
+combine_maf_bcftools_stats                2
+concat_gvcf_sections                     72
+filter_and_sort_bams                     72
+gather_scattered_vcfs                    41
+genome_dict                               1
+genome_faidx                              1
+genomics_db2vcf_scattered               245
+genomics_db_import_chromosomes           30
+genomics_db_import_scaffold_groups       11
+get_ave_depths                            1
+get_genome                                1
+get_genome_length                         1
+hard_filter_indels                       41
+hard_filter_snps                         41
+maf_filter                               82
+make_chromo_interval_lists               30
+make_gvcf_sections                     2952
+make_indel_vcf                           41
+make_scaff_group_interval_lists          11
+make_scatter_interval_lists             245
+make_snp_vcf                             41
+map_reads                                72
+mark_dp0_as_missing                      41
+mark_duplicates                          72
+remove_duplicates                        72
+samtools_stats                           72
+thin_bam                                 72
+trim_reads_pe                            72
+total                                  4761
+
+So the get_genome need's to be adjusted a bit, as it's calling the wrong reference genome right now. If we open up workflow/rules/ref.smk we can see that the get_genome rule seems like it's trying to full the reference from the interent, but I didn't add a url under the re: section of the config.yaml. So, this will either fail, or skip this rule and just directly pull from resources/genome.fasta. So, I guess first go I will just adjust the genome.fasta file to be my actual reference and put it in the right place and see if this works.
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/snakemake/GCA_015227805.3_bHirRus1.pri.v3_genomic.fna.gz ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/resources
+```
+
+Then, for each of use, I'm going to rename that actual file to genome.fasta so I don't have to rewrite every rule that calls it.
+
+```{bash}
+cd resources
+gunzip GCA_015227805.3_bHirRus1.pri.v3_genomic.fna.gz
+mv GCA_015227805.3_bHirRus1.pri.v3_genomic.fna genome.fasta
+```
+
+## running
+Alright, that's all the adjustments that need to be made as far as I can tell. Let's give it a shot.
+
+So we're just going to run this to the .bam stage, stopping at the gatk rules. We'll put the following code into an sbatch script and submit that as a job because it will need lots of memory.
+
+```{bash, label="snakemake.sbatch"}
+#!/bin/bash
+#SBATCH --job-name=snakemake
+#SBATCH --output=snakemake.%j.out
+#SBATCH --error=snakemake.%j.err
+#################
+#SBATCH -t 24:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --ntasks-per-node 24
+#SBATCH --mem=89G
+#################
+#SBATCH --mail-type=FAIL, END
+#################
+#SBATCH  --mail-user=ericacnr@colostate.edu
+##################
+#echo commands to stdout
+set -x
+
+source ~/.bashrc
+
+conda activate snakemake-8.20.4
+
+snakemake -p --profile hpcc-profiles/slurm/alpine --configfile example-configs/LOSH-Apr-25/config.yaml --until make_gvcf_sections --rerun-incomplete
+```
+
+This times out, but getting a qos=long isn't really an option with priority as low as mine. So, my approach is to just run this a bunch of times (unlocking it between runs) and including a --rerun-incomplete flag to remake any weird files from before. Theoretically, this will reduce the number of jobs each time and, eventually, it will finish. Update: this is taking 4+ days? Seems like a long time to me, but the number of jobs is steadily decreasing.
+
+## getting the other files over
+Had to reconfig a new remote to get rclone to work...
+
+This is within the vcf_2024/ which I made just to store this. When the other snakemake run is over I'll put them all in the same folder, touch all of them (so the have the same creation time) and then run the calling steps of the snakemake flow.
+```{bash}
+rclone copy -P --tpslimit 10 --fast-list remote2:/Genetic_and_Environmental_Data/Species_genetic_data/BANS/snakemake-results-May2024/bqsr-round-0/gvcf_6x ./
+```
+October 28th:
+Job stats:
+job                   count
+------------------  -------
+make_gvcf_sections     2517
+thin_bam                 27
+total                  2544
+
+October 29th:
+Job stats:
+job                   count
+------------------  -------
+make_gvcf_sections     2373
+thin_bam                 26
+total                  2399
+
+November 1st:
+Job stats:
+job                   count
+------------------  -------
+make_gvcf_sections     2253
+thin_bam                 22
+total                  2275
+
+November 2st:
+Job stats:
+job                   count
+------------------  -------
+make_gvcf_sections     2139
+thin_bam                 22
+total                  2161
+
+The make_gvcf_sections is the problem. It's taking forever for each section... for example
+s       h:m:s   max_rss max_vms max_uss max_pss io_in   io_out  mean_load       cpu_time
+7894.6056       2:11:34 2418.89 9107.74 2393.25 2394.53 0.00    5.04    98.49   7776.80
+s       h:m:s   max_rss max_vms max_uss max_pss io_in   io_out  mean_load       cpu_time
+16703.8784      4:38:23 2624.54 8904.11 2600.87 2601.95 0.00    62.68   102.12  17057.94
+
+Running everything in the headnode now, with the hpcc configeration so it's running multiple jobs in parallele. Still taking forever but there's fewer jobs...
+November 7th:
+Job stats:
+job                   count
+------------------  -------
+make_gvcf_sections     1415
+thin_bam                 22
+total                  1437
+
+ls results/bqsr-round-0/gvcf_sections/* |wc -l
+3265
+
+Trying to see how many of the sections it's gone through because the number of samples hasn't increased past 50... hopefully tomorrow the 3265 will go up.
+
+Ah but I see now that some of the jobs might be timing out! This is so frustrating. I'll check again at the end of the day and if none of the jobs seem to be completing I'll give them back the full time (24 hours instead of 12). Seems like lots of sections would finish in time (based on a couple of benchmark files) but that some take a lot longer. So maybe I just run it out on the ones that can finish and once those cap out go back and up the time for what's left...
+
+A couple hours later:
+ls results/bqsr-round-0/gvcf_sections/* |wc -l
+3461
+
+Yay, that all finished! So I concatted all of them with a quick snakemake rule to get the new ones to g.vcf.gz and then moved the vcf_2024 files over. I touched everything and started a new snakemake run that should put all the files to the end.
+
+snakemake -p --profile hpcc-profiles/slurm/alpine --configfile example-configs/LOSH-Apr-25/config.yaml --rerun-incomplete -np
+
+running this through sbatch this time to be well behaved (although they haven't emailed me to stop running stuff in the head node so...).
+
+# it ran!
+Okay, so now I have .bcf files in the results/bqsr-round-0/bcf folder. There are three:
+all.bcf  all.bcf.csi  
+pass-maf-0.01.bcf  pass-maf-0.01.bcf.csi	
+pass-maf-0.05.bcf  pass-maf-0.05.bcf.csi
+
+I'm going to pop that maf0.05 one over into an informatively named vcf:
+
+```{bash}
+#!/bin/bash
+#
+#SBATCH --job-name=bcftovcf
+#SBATCH --output=bcftovcf.%j.out
+#SBATCH --error=bcftovcf.%j.err
+#SBATCH -t 12:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 16
+#SBATCH --mem=59G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+source ~/.bashrc
+conda activate bioinf
+bcftools view --threads 16 \
+  -Oz \
+  -o vcf_final/BANS.all.ds6x.pass-maf-0.05.vcf.gz \
+  bcf/pass-maf-0.05.bcf
+  
+bcftools index --threads 16 vcf_final/BANS.all.ds6x.pass-maf-0.05.vcf.gz
+```
+
+Then I need to do some additional filtering on that file...
+```{bash}
+#!/bin/bash
+#
+#SBATCH --job-name=filt
+#SBATCH --output=filt.%j.out
+#SBATCH --error=filt.%j.err
+#################
+#SBATCH -t 1:00:00
+#SBATCH -p amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 2
+#SBATCH --mem=6G
+#################
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=ericacnr@colostate.edu
+##################
+#echo commands to stdout
+set -x
+
+source ~/.bashrc
+
+#run this from the 01.fastq_processing
+
+mkdir -p vcf/filtered_HC
+
+##Location of fasta file and
+REFERENCE="/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/resources/genome.fasta"
+IN="vcf_final/BANS.all.ds6x.pass-maf-0.05.vcf.gz"
+OUT="vcf_final"
+
+conda activate gatk_4
+###Select variants- SNPs
+java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /curc/sw/install/bio/gatk/4.3.0.0/gatk-package-4.3.0.0-local.jar IndexFeatureFile \
+  -I $IN
+  
+java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /curc/sw/install/bio/gatk/4.3.0.0/gatk-package-4.3.0.0-local.jar SelectVariants \
+     -R $REFERENCE \
+     -V $IN \
+     -select-type SNP \
+     --O $OUT/BANS.all.ds6x_gatk.SNP.vcf
+     
+conda activate bioinf
+
+###VCFtools for filtering
+vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.vcf --out $OUT/BANS.all.ds6x_gatk.SNP.05maf --min-alleles 2 --max-alleles 2 --max-missing 0.5 --maf 0.05 --recode
+
+conda activate gatk_4
+
+##GATK for hard filtering VWSR, Auwera et al 2013, with gatk4
+
+java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /curc/sw/install/bio/gatk/4.3.0.0/gatk-package-4.3.0.0-local.jar VariantFiltration \
+-R $REFERENCE \
+-V $OUT/BANS.all.ds6x_gatk.SNP.05maf \
+-filter "QUAL < 30.0" --filter-name "QUAL30" \
+-filter "SOR > 3.0" --filter-name "SOR3" \
+-filter "FS > 60.0" --filter-name "FS60" \
+-filter "MQ < 40.0" --filter-name "MQ40" \
+-filter "QD < 2.0" --filter-name "QD2" \
+-filter "MQRankSum < -12.5" --filter-name "MQRankSum-12.5" \
+-filter "ReadPosRankSum < -8.0" --filter-name "ReadPosRankSum-8" \
+-O $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.vcf
+
+#Exclude filtered variants (PASS= pass filters)
+java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /curc/sw/install/bio/gatk/4.3.0.0/gatk-package-4.3.0.0-local.jar  SelectVariants \
+     -R $REFERENCE \
+     -V $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.vcf \
+     --exclude-filtered  true \
+     -O $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf
+
+
+conda activate bioinf
+
+##VCFtools for filtering based on missingness, once you remove systematic errors. Play around with this to get the numbers you want and make sense
+vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --out $OUT/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz --max-missing 0.8 --recode
+```
+
+
+

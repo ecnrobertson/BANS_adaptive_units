@@ -1,0 +1,71 @@
+---
+title: "05.2.statistical_modeling"
+author: "Erica Robertson"
+date: "2025-10-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(terra)
+```
+# Running the GAMM
+```{r}
+data <- read.csv("prelim_data.csv")
+data$group <- factor(data$group)
+```
+
+Visualizing the data.
+```{r}
+data <- read.csv("prelim_data.csv")
+data$group <- as.factor(data$group)
+
+ggplot(data %>% filter(group==3), aes(x = mean, y = abd_trend, color=group)) +
+  geom_point(size = 2, alpha = 0.7) +
+  theme_minimal() +
+  labs(x = "Temperature change", y = "Trend", color = "Group")
+
+# Add smooths (nonparametric loess just for visualization)
+ggplot(data, aes(x = mean, y = lc_cropland, color = group)) +
+  geom_point(size = 2, alpha = 0.6) +
+  geom_smooth(method = "gam", se = TRUE) +
+  theme_minimal() +
+  labs(x = "Temperature change", y = "Trend", color = "Group")
+
+```
+Does seem like a GAM might be a good approach for groups 2 and 3. Group 1, however, is really limited datawise. I think it's worth dropping that group for now as it might mess up the overall model fit.
+
+```{r}
+data.no1 <- data %>% filter(group!=1)
+#only lost like 20 points! So, yeah, not great...
+```
+
+Now let's try and run some GAM models.
+The following model will be used, where X_y and X_z are examples of predictors. This model includes smoothing functions and interaction terms between the predictors (Wood 2017).
+
+trend ~ s(X_y)+s(X_z) + ti(X_y,X_z) 
+```{r}
+library(mgcv)
+#s() is allowing the temperature to vary across space, spatially varying effect approach
+m.test <- gam(abd_trend ~ s(mean, k = 5), data=data)
+summary(m.test)
+plot(m.test)
+#could already be removing one of the three categories, because it's a factor it's already
+m <- gam(abd_trend ~ s(mean, k = 5) + group, data = data)
+summary(m)
+plot(m)
+#this is smoothing each group separately
+m2 <- gam(abd_trend ~ s(mean, by = group, k = 10) + group, data = data)
+summary(m2)
+plot(m2)
+
+#projection for lat and long might be problematic, the dimensions change as they get more towards the poles
+m2 <- gam(abd_trend ~ s(mean, by = group, k = 10) + group + s(lat) + s(long), data = data)
+summary(m2)
+```
+To get the actual affect of group 2 and 3, need to add in the intercept to the Estimate. This is because the intercept is capturing group 1.
