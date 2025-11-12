@@ -1,0 +1,265 @@
+---
+title: "Create units for LOSH"
+author: "Christen Bossu"
+date: "7/27/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+And now we can start processing that stuff  Since the file names
+don't all follow the same conventions, we have to do slightly different
+things with the `.fq.gz` ones versus the `.fastq.gz` ones.  We throw in
+a little `case_when()` for those situations.
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/BANS_25_fastq_listings.txt /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/snakemake
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+files <- read_table("../BANS_25_fastq_listings.txt", col_names = FALSE) %>%
+  dplyr::select(X8, X4) %>%
+  mutate(kb = X4/1000) %>%
+  rename(fq = X8) %>%
+  dplyr::select(fq, kb) %>%
+  mutate(base = basename(fq)) %>%
+  mutate(
+    sample_id = case_when(
+            str_detect(base, "\\.fq\\.gz") ~ str_match(base, "^B_(.*)_[12]\\.fq\\.gz")[,2],
+      str_detect(base, "\\.fastq\\.gz") ~ str_match(base, "^(.*)_S[0-9]+.*\\.fastq\\.gz")[,2],
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  mutate(
+    read = case_when(
+      str_detect(base, "\\.fq\\.gz") ~ str_match(base, "B*_([12])\\.fq\\.gz")[,2],
+      str_detect(base, "\\.fastq\\.gz") ~ str_match(base, "L*_R([12])_001*\\.fastq\\.gz")[,2],
+      TRUE ~ NA_character_
+    )
+  ) 
+files
+```
+
+Now, because the naming of the files does not always have the lane, etc., and
+we want to machine name (not really necessary, but we can get it easily from
+the first line of each file), I make a file that has that info that we can join
+onto the path:
+```sh
+for i in  raw_data/01.RawData_2025/B*/*fq.gz; do zcat $i | awk -v f=$i 'BEGIN {OFS="\t"} NR==1 {print f, $1; exit}'; done | awk '!/Undetermined/' > BANS_2025_seq-tags-per-path.tsv
+```
+<!-- The results of that have been put into: -->
+<!-- ``` -->
+<!-- example-configs/YEWA-Jan-2023/prep/inputs/seq-tags-per-path.tsv -->
+<!-- ``` -->
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/BANS_2025_seq-tags-per-path.tsv /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/snakemake
+
+```
+And we can make it nice like this:
+```{r}
+seq_ids <- read_tsv("../BANS_2025_seq-tags-per-path.tsv", col_names = c("fq", "id")) %>%
+  separate(
+    id, 
+    into = c("x1", "x2", "flowcell", "lane"), 
+    sep = ":", 
+    extra = "drop"
+  ) %>%
+  dplyr::select(-x1, -x2) %>%
+  mutate(platform = "ILLUMINA")
+```
+
+And we can now join those and pivot them to get fq1 fq2 kb1 and kb2 all on the same
+line, and then assign snakemake sample numbers to them.
+```{r}
+files_wide <- files %>%
+  left_join(seq_ids, by = "fq") %>%
+  dplyr::select(-base) %>%
+  pivot_wider(
+    values_from = c(fq, kb),
+    names_from = read,
+    names_sep = ""
+  ) %>%
+  arrange(sample_id, flowcell, lane) %>%
+  mutate(
+    sample_id = sub("_.*", "", sample_id),
+    sample = sample_id
+  )
+```
+
+We will, at the same time, add libraries to them.  It looks like birds were either
+done on "Plate1" or "Plate2", and the reseqs were done on a new library prep that
+we will call Plate3.
+
+So, now we can make our units file.  For barcodes I am just going to do the
+sample_id + library.  It just needs to be unique for those.
+```{r}
+units_all <- files_wide %>%
+  mutate(
+    library = "Plate3") %>%
+  group_by(sample) %>%
+  mutate(unit = 1:n(), .after = sample) %>%
+  ungroup() %>%
+  mutate(
+    barcode = str_c(sample_id, library, sep = "-")
+  ) %>%
+  dplyr::select(sample, unit, library, flowcell, platform, lane, sample_id, barcode, fq1, fq2, kb1, kb2)
+```
+
+And, finally, we write that out:
+```{r}
+write_tsv(units_all, file = "../BANS.Plate3.units.tsv")
+```
+
+Run the Plate3 files to g.vcf (the first gatk step), then make another Plate1-3.units.tsv with all of the individuals, get all the .g.vcfs from all individuals together, then move onto the gatk database step with everybody. Then they all go through together from there. Might need to change the date on the units file so that it's before the .g.vcf files, or touch everything so it's the same date (to avoide making snakemake thing it's an older version and everything needs to be made over).
+
+--np to test the rules
+--until whatever the rule is for the first gatk step
+
+Running the snakemake commands as a .sbatch job (snakemake_mega.sbatch), may need to do a qos=long, with a time of 48 hours.
+
+## Making chromosomes and scaffold groups
+
+We do this with R.  As always, it is important to look at the format
+in `.test/chromosomes.tsv` and `.test/scaffold_groups.tsv` to know the format.
+```{r}
+# as I did before, we will let anything over 30 Mb be a "chromosome" and then
+# we will shoot for scaffold groups < 50 Mb in total.
+fai <- read_tsv(
+  "~/Downloads/Barn_swallow_genome/GCA_015227805.3_bHirRus1.pri.v3_genomic.fna.fai", col_names = c("chrom", "len", "x1", "x2", "x3")) %>%
+  dplyr::select(-starts_with("x")) %>%
+  mutate(cumlen = cumsum(len))
+
+# here are the lengths:
+fai %>%
+  mutate(x = 1:n()) %>%
+  ggplot(aes(x=x, y = len)) + geom_col()
+```
+Proceeding:
+```{r}
+chromos <- fai %>%
+  filter(len >= 4e6) %>%
+  rename(num_bases = len) %>%
+  dplyr::select(-cumlen)
+
+write_tsv(chromos, file = "BARNS.chromosomes.tsv")
+
+
+# now, get the scaff groups
+scaffs <- fai %>%
+  filter(len < 4e6)
+
+bin_length <- 3e06
+
+scaff_groups <- scaffs %>%
+  mutate(
+    cumul = cumsum(len),
+    part = as.integer(cumul / bin_length) + 1L
+  ) %>%
+  mutate(
+    id = sprintf("scaff_group_%03d", part),
+    .before = chrom
+  ) %>%
+  dplyr::select(-part, -cumlen)
+
+# let's just see the total lengths of those scaff_groups
+# and also the number of scaffolds in each
+scaff_groups %>%
+  #read_delim("../scaffold_groups_new.tsv",delim="\t") %>% 
+  group_by(id) %>%
+  summarise(
+    tot_bp = sum(len),
+    num_scaff = n()
+  )
+```
+Good, that is not too many scaff groups, and also not too many scaffolds
+per any one group.
+```{r}
+write_tsv(scaff_groups, file = "BARNS.scaffold_groups.tsv")
+```
+
+
+## Setting up the config.yaml file
+
+As always, it is important to start from .test/config/config.yaml, because that
+is the most up-to-date.  So I copied that to 
+```
+example-configs/YEWA-Jan-2023/config.yaml
+```
+And then I edited it as appropriate.
+
+## Getting the scatters file
+
+I set the scatters to "" in the config like this:
+```yaml
+scatter_intervals_file: ""
+```
+And then I committed all the stuff I just created here and pushed it up to the cluster.
+Then, as suggested in the README, did this:
+```sh
+(base) [node21: mega-non-model-wgs-snakeflow]--% pwd
+/home/eanderson/scratch/PROJECTS/YEWA-Jan-2023/mega-non-model-wgs-snakeflow
+(base) [node21: mega-non-model-wgs-snakeflow]--% conda activate snakemake-7.7.0
+(snakemake-7.7.0) [node21: mega-non-model-wgs-snakeflow]--% module load R
+(snakemake-7.7.0) [node21: mega-non-model-wgs-snakeflow]--% snakemake  --cores 1 --use-conda results/scatter_config/scatters_5000000.tsv --configfile example-configs/YEWA-Jan-2023/config.yaml
+
+# then copy the result to the config area:
+(snakemake-7.7.0) [node21: mega-non-model-wgs-snakeflow]--% cp results/scatter_config/scatters_5000000.tsv example-configs/YEWA-Jan-2023/
+```
+After that I also updated the config file to point to that new file:
+```yaml
+scatter_intervals_file: "example-configs/YEWA-Jan-2023/scatters_5000000.tsv"
+```
+
+Now, when it is calling variants from the Genomics Data Bases, it will scatter
+the job over sections of genome that are less that 5 Mb (hence the 5000000 in the
+name).
+
+I committed that and pushed it back up.
+
+And now we are ready to do a dry run:
+```sh
+(snakemake-7.7.0) [node21: mega-non-model-wgs-snakeflow]--% snakemake -np --profile hpcc-profiles/slurm/sedna 
+YEWA-Jan-2023/config.yaml
+```
+
+
+We can check that this makes sense with the numbers of things we have:
+```{r}
+nrow(units_all)
+```
+
+35 units.  That is the number of trimming and mapping and fastqc jobs we expect.
+
+```{r}
+n_distinct(units_all$sample)
+```
+
+35 distinct samples.  That is the number of dup-marking and other sorts of
+jobs we expect.
+
+```{r}
+nrow(chromos)
+n_distinct(scaff_groups$id)
+```
+
+1 chromosome and 21 scaffold groups.  So we expect a few jobs doing
+1 or 21, or 25 things.
+
+And, for making gvcf sections, we expect:
+Number of individuals times (number of chroms + number of scaff groups) so:
+22 * 35 = 770.
+
+Finally, we expect the total number of GenomicsDB2VCF steps to be the number
+of unique scatter groups (Note that we use the old scatters file here, so that
+things stay consistent when I run this notebook.
+```{r}
+scats <- read_tsv("../scatters_5000000.tsv")
+n_distinct(scats$id, scats$scatter_idx)
+```
+
+So, 274 of those jobs.  
