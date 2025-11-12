@@ -10,3 +10,4 @@ analysis/04.delineate_AUs/results/
 analysis/05.predictors_of_decline/results/
 analysis/05.predictors_of_decline/spatial_predictors/
 analysis/06.genomic_offset/results/
+analysis/06.genomic_offset/*.RData
