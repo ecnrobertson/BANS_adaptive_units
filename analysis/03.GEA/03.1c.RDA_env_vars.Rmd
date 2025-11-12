@@ -1,0 +1,193 @@
+---
+title: "03.1c.RDA_env_vars"
+author: "Erica Robertson"
+date: "2025-10-29"
+output: html_document
+---
+
+```{r}
+library(vegan)
+library(adegenet)
+library(tidyverse)
+require(readr)
+library(data.table)
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("LEA")
+library(LEA)
+library(openxlsx)
+library(sf)
+library(geosphere)
+```
+
+#DEFINING POPULATIONS
+So I've already put together the environmental data for each individual, that was done within the 01b.spatial_data.Rmd script.
+```{r, message=FALSE, warning=FALSE}
+meta <- read.delim("../../data/spatial_files/BANS.initial.worldclim.txt")
+```
+
+```{r}
+coords <- meta %>% select(Long, Lat)
+coords_proj <- st_as_sf(meta, coords = c("Long", "Lat"), crs="+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+```
+
+So let's see how we can group these individuals into populations.
+```{r, message=FALSE, warning=FALSE}
+# calculate distance matrix using Haversine distance
+dist_matrix <- distm(as.matrix(coords), fun = distHaversine)
+
+# clustering
+hclust_groups <- hclust(as.dist(dist_matrix), method = "complete") # complete method here avoids chaining, ensuring all samples in a cluster are within the specified distance of each other. If you want some flexibility you could try "average"
+
+# cut tree at 111.111 km to assign spatial clusters
+meta$GroupID <- cutree(hclust_groups, h = 111111)
+
+# create population labels and filter for minimum cluster size
+meta.sub <- meta %>%
+  mutate(Pop = paste0("Cluster_", GroupID)) %>%
+  group_by(Pop) %>%
+  filter(n() > 3) %>%  # keep clusters with ≥4 individuals
+  ungroup()
+```
+
+```{r}
+pops.latlong <- data.frame(BGP_ID=meta.sub$BGP_ID, Group = meta.sub$Pop, Lat=meta.sub$Lat, Long=meta.sub$Long)
+```
+
+# RETRIEVE ENVIRONMENTAL VARIABLES
+
+Now we're loading in the environmental data that we got earlier.
+
+So this is getting together the climate data for each population and filtering to pops (clusters) that have more than 4 samples. In my case this doesn't remove anything so it's fine.
+```{r}
+library(tidyverse)
+pops <- read.table(file = "BANS_sample_list_pop.tsv", sep="\t", header = FALSE) %>% rename(BGP_ID = V1, Pop = V3) %>% dplyr::select(BGP_ID, Pop)
+
+clim <- read_delim("../../data/BANS.initial.worldclim.landscape_edit.txt", delim = "\t") %>% 
+  left_join(pops, by = "BGP_ID") %>%
+  dplyr::select(starts_with("bio"), sand, clay, Pop) %>%
+  group_by(Pop) %>% 
+  summarise(
+    n = n(),
+    across(starts_with("bio"), mean, .names = "{.col}"),
+    biosand = mean(sand, na.rm = TRUE),
+    bioclay = mean(clay, na.rm = TRUE)
+  ) %>% 
+  filter(n > 4)
+```
+
+The populations file you create earlier in this markdown, and provide to plink to calculate allele frequencies within are almost certainly in the same order as the plink allele frequencies output. But just to be safe, I extract the order the populations are listed from the plink population allele frequency file, so that we can list the environmental predictors in the same order. Here is the command.
+```{bash}
+awk 'NR>1 { if(!seen[$3]++) print $3 }' BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.frq.strat > BANS-frq-pop-order.txt
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/BANS-frq-pop-order.txt /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA
+```
+
+```{r}
+## reorder so that env and alle frequencies per pop are reported in the same order
+poporder <- read.table(file = "BANS-frq-pop-order.txt", header = F) %>% rename(Pop = V1)
+clim_ordered <- poporder %>% left_join(clim) %>% dplyr::select(-n)
+
+write.table(clim_ordered, file = "Bans_env_pop.txt", row.names=F, quote=F, sep="\t")
+```
+
+# RUNNING THE FORWARD SELECTION
+```{r}
+env <- read_delim("../../data/spatial_files/BANS.initial.worldclim.txt", delim = "\t")
+
+env <- left_join(indorder, env, by = "BGP_ID")
+
+env$BGP_ID == indorder$BGP_ID
+
+long_lat<-pops.latlong %>% dplyr::select(Long,Lat)
+
+pred <- env %>% dplyr::select(bio01:bio19)
+pred <- scale(pred, center=TRUE, scale=TRUE) # center=TRUE, scale=TRUE are the defaults for scale()
+pred2<-as.data.frame(pred)
+rownames(pred2) <- env$BGP_ID
+
+genotypes <- fread("/Users/ericarobertson/Desktop/BANS_adaptive_units/data/subsampled_noheader.raw")
+genotypes.clean <- genotypes[,-(1:6)]
+rownames(genotypes.clean) <- genotypes$FID 
+
+bans.mod0 <- rda(genotypes.clean  ~ 1, pred2) # Model with intercept only
+bans.rda.all <- rda(genotypes.clean ~ bio01+bio02+bio03+bio04+
+                      bio05+bio06+bio07+bio08+bio09+bio10+
+                      bio11+bio12+bio13+bio14+bio16+
+                      bio17+bio18+bio19, pred2) # Model with all explanatory variables
+saveRDS(bans.rda.all,"results/BANS.RDAresutls..all_env_b4_varsel.RDS")
+#bans.rda.all<-readRDS("bans.RDAresutls.109Indiv_impute.all_env_b4_varsel.RDS")
+
+
+RsquareAdj(bans.rda.all)
+#$r.squared [1] 0.1542569
+
+#$adj.r.squared [1] 0.02010453
+summary(eigenvals(bans.rda.all, model = "constrained"))
+
+
+## Example of ordiR2step (always forward), 1000 peermutations and p-vaue in 0.01 (pinelodge)
+mod<-ordiR2step(bans.mod0,bans.rda.all,direction="forward",R2permutations=1000,Pin=0.01,R2scope=T)  
+saveRDS(mod,"results/ForwardSel.bans.Env.UncorrectedPop.RDS")
+mod$anova
+
+#bio02
+#bio14
+#bio09
+#bio19
+```
+
+For reference, the varaibles I got with GF were:
+WITHOUT LANDSCAPE DATA
+BIO2 = Mean Diurnal Range (Mean of monthly (max temp - min temp))
+BIO5 = Max Temperature of Warmest Month
+BIO7 = Temperature Annual Range (BIO5-BIO6)
+BIO3 = Isothermality (BIO2/BIO7) (×100)
+
+WITH THE LANDSCAPE DATA:
+BIO16 = Precipitation of Wettest Quarter
+bioclay = g/kg
+BIO8 = Mean Temperature of Wettest Quarter
+BIO10 = Mean Temperature of Warmest Quarter
+BIO11 = Mean Temperature of Coldest Quarter
+
+# RUNNING FULL RDA MODEL
+```{r}
+
+## Full model
+pRDAfull <- rda(gen.impall ~ PC1 + PC2 + PC3 + long + lat + bio12 + bio03 + bio15 + tree + bio16 + bio14 + bio07,  pred2)
+RsquareAdj(pRDAfull)
+anova(pRDAfull)
+
+
+#Adaptive landscape: projecting adaptive gradient(s) across space
+### Adaptively enriched RDA- we are not subsetting to the super adpative loci, but Brenna did
+RDA_outliers <- rda(gen.impall ~ bio12 + bio03 + bio15 + tree + bio16 + bio14 + bio07,  pred2)
+RsquareAdj(RDA_outliers)
+anova(RDA_outliers)
+
+TAB_loci <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="species", scaling="none"))
+TAB_var <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="bp"))
+
+pdf("RDA_outlier.biplot.pdf")
+ggplot() +
+  geom_hline(yintercept=0, linetype="dashed", color = gray(.80), size=0.6) +
+  geom_vline(xintercept=0, linetype="dashed", color = gray(.80), size=0.6) +
+  geom_point(data = TAB_loci, aes(x=RDA1*3, y=RDA2*3), colour = "#EB8055FF", size = 2, alpha = 0.8) + #"#F9A242FF"
+  geom_segment(data = TAB_var, aes(xend=RDA1, yend=RDA2, x=0, y=0), colour="black", linewidth=0.15, linetype=1, arrow=arrow(length = unit(0.02, "npc"))) +
+  geom_text(data = TAB_var, aes(x=1.1*RDA1, y=1.1*RDA2, label = row.names(TAB_var)), size = 2.5, family = "Times") +
+  xlab("RDA 1 (XX%)") + ylab("RDA 2 (XX%)") +
+  facet_wrap(~"Adaptively not really enriched RDA space") +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(panel.grid = element_blank(), plot.background = element_blank(), panel.background = element_blank(), strip.text = element_text(size=11))
+dev.off()
+
+
+
+
+
+```

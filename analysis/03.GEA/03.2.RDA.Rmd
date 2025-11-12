@@ -100,7 +100,6 @@ pops <- read.table(file = "BANS_sample_list_pop.tsv", sep="\t", header = FALSE) 
 
 genotypes <- fread("/Users/ericarobertson/Desktop/BANS_adaptive_units/data/subsampled_noheader.raw")
 
-
 indorder <- fread("../../data/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.fam") %>% rename(BGP_ID = V1) %>% dplyr::select(BGP_ID)
 
 env <- read_delim("../../data/spatial_files/BANS.initial.worldclim.txt", delim = "\t")
@@ -198,8 +197,6 @@ b05
 
 ###clustering by geography
 ##Time to plot the PCA.
-```{r}
-
 ```{r}
 library(ggplot2)
 library(dplyr)

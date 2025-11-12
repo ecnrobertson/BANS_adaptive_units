@@ -1,13 +1,13 @@
 ---
-title: "03.1.gradient_forest"
+title: "03.1b.gradient_forest_env_vars"
 author: "Erica Robertson"
-date: "2025-08-13"
+date: "2025-10-22"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-knitr::opts_knit$set(root.dir="~/Desktop/BANS/BANS_adaptive_units/")
+knitr::opts_knit$set(root.dir="~/Desktop/BANS/BANS_adaptive_units/analysis/03.GEA")
 ```
 
 Adapted from Holden Fox's gradient forest tutorial!!
@@ -29,7 +29,6 @@ We're gonna need two files for this run:
 For this, we're going to be using per population allele frequencies. GF is a machine learning approach that fits a lon-linear relationship between genetic variation and environmental variables. It treats each population as a single data point, which averages out individual-level noise. RDA is a multivariate constrained ordination methods (basically a fancy linear regression) that detects linear relationships between genetic variation and environmental variables. It benefits from hjaving lots of independent observations to estimate patterns, so each individual provides one observation in the genotype space. More individuals increases statistical power, so we will run the RDA on individual level allele frequencies.
 
 # CALCULATING PER POPULATION ALLELE FREQUENCIES
-
 ## Grouping Populations
 When calculating allele frequencies per population, we want to define populations as a collection of 4 or more samples within 1 square latitude, longitude of each other. For gradientForest and RDA, we won't consider populations with a sample size < 4. We also need a vcf that doesn't have any missing data. So out options are to filter out all the data, or impute missing data. The first one is more stringent and will remove alot of SNPs. The second maintains SNPs but you are created artificial data so some people don't like to do it. If you've got time, I'd do both and see if it changes anything!
 
@@ -228,6 +227,8 @@ R
 
 Let's use a loop to create 5 different set. We're going to sed seeds so it's reproducible, but the seed needs to change so that it's not randomly sampling the same set again and again.
 ```{r}
+library(data.table)
+library(tidyverse)
 # SNP frequency data
 df <- fread("BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.frq.strat", header = TRUE)
 
@@ -246,7 +247,7 @@ for (val in 1:5) {
     pivot_wider(names_from = SNP, values_from = MAF) %>%
     select(-CLST)  # remove CLST column after pivot
   
-  out_file <- paste0("BANS.pop.frq.strat.50k.", val, ".txt")
+  out_file <- paste0("subsample_data/BANS.pop.frq.strat.50k.", val, ".txt")
   write.table(as.data.frame(subset50k_wide),
               file = out_file, row.names = FALSE, quote = FALSE, sep = "\t")
   
@@ -254,21 +255,22 @@ for (val in 1:5) {
 }
 ```
 
-# RETRIEVE ENVIRONMENTL VARIABLES
+Let's move these onto my computer so I can work with them...
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/subsample_data /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA 
+```
+
+# RETRIEVE ENVIRONMENTAL VARIABLES
 
 Now we're loading in the environmental data that we got earlier.
-
-(this is if I'm running this on the cluster, but I'm going to try on my local computer first)
-<!-- ```{bash} -->
-<!-- rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/data/BANS_sample_list_pop.tsv ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/ -->
-<!-- ``` -->
 
 So this is getting together the climate data for each population and filtering to pops (clusters) that have more than 4 samples. In my case this doesn't remove anything so it's fine.
 ```{r}
 library(tidyverse)
-pops <- read.table(file = "BANS_sample_list_pop.tsv", sep="\t", header = FALSE) %>% rename(BGP_ID = V1, Pop = V3) %>% dplyr::select(BGP_ID, Pop)
+pops <- read.table(file = "data/BANS_sample_list_pop.tsv", sep="\t", header = FALSE) %>% rename(BGP_ID = V1, Pop = V3) %>% dplyr::select(BGP_ID, Pop)
 
-clim <- read_delim("../../data/BANS.initial.worldclim.landscape_edit.txt", delim = "\t") %>% 
+clim <- read_delim("data/BANS.initial.worldclim.landscape_edit.txt", delim = "\t") %>% 
   left_join(pops, by = "BGP_ID") %>%
   dplyr::select(starts_with("bio"), sand, clay, Pop) %>%
   group_by(Pop) %>% 
@@ -283,8 +285,8 @@ clim <- read_delim("../../data/BANS.initial.worldclim.landscape_edit.txt", delim
 The populations file you create earlier in this markdown, and provide to plink to calculate allele frequencies within are almost certainly in the same order as the plink allele frequencies output. But just to be safe, I extract the order the populations are listed from the plink population allele frequency file, so that we can list the environmental predictors in the same order. Here is the command.
 ```{bash}
 awk 'NR>1 { if(!seen[$3]++) print $3 }' BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.frq.strat > BANS-frq-pop-order.txt
-
-
+```
+```{bash}
 rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/BANS-frq-pop-order.txt /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA
 ```
 
@@ -295,234 +297,94 @@ clim_ordered <- poporder %>% left_join(clim) %>% dplyr::select(-n)
 
 Ebans <- clim_ordered %>% dplyr::select(-Pop)
 
-write.table(Ebans, file = "Bans_env.txt", row.names=F, quote=F, sep="\t")
+write.table(Ebans, file = "data/Bans_env.txt", row.names=F, quote=F, sep="\t")
 ```
 
 # RUNNING GRADIENT FOREST
+Two parts here. The first is to generate 5 GF models (one for each subset of SNPs we made before). For each model, we'll evaluate how well it's doing and get the environmental variables out. Then, part 2 is to compare across the 5 models we made to check for consistency.
 
-###original way
-Hopefully that worked out ok. Finally we are on to running the gradient forest. The gradient forest is going to run on the cluster again. I'm going to continue working on an interative node for troubleshooting, but it would certainly run as a slurm job.
+## Generating and testing the models
+So this is going to be making multiple GF models on different subsets of 50k SNPs, and the comparing everything to a bunch of null models with random environmental samples to see if the performance is okay.
 
-We must first define a few variables that gradient forest needs and then we can run program with a single command.
+This is taken an adapted from Caitlin Miller's code: https://github.com/mcaitlinv/bans-breeding/blob/main/05_au/scripts/gradFor_multiRun.R
 
-You need gradient forest loaded in R to plot correctly, so I am creating the plots on the cluster, saving them with a pdf device.
-
-This runs on the cluster
+So, this is a big chunk of code. I'm going to summarize what it's doing:
+*For each SNP subset (1-5)*
+1. builds a GF model for that subset
+2. plots predictor importance for that model (importance plot)
+3. checks for multicollinearity in environmental predictors (runs correlation matrix)
+4. computes model performance metrics (R2, so the strength of GxE relationship)
+5. provides randomization tests to tests the GF model quality (is the fit greater than random expectation?)
 ```{r}
-library(data.table)
 library(gradientForest)
-Ebans <- read.table(file="Bans_env.txt", sep="\t", header=T)
-Gbans <- fread("BANS.pop.frq.strat.50k.txt",sep="\t")
-dim(Gbans)
-colnames(Gbans) <- make.names(colnames(Gbans))
-
-preds <- colnames(Ebans)
-specs <- colnames(Gbans)
-
-nSites <- dim(Gbans)[1]
-nSpecs <- dim(Gbans)[2]
-
-# set depth of conditional permutation
-lev <- floor(log2(nSites*0.368/2))
-lev
-
-bansforest=gradientForest(cbind(Ebans,Gbans), 
-                          predictor.vars=preds, 
-                          response.vars=specs, 
-                          ntree=100, 
-                          transform = NULL, 
-                          compact=T, 
-                          nbin=101, 
-                          maxLevel=lev, 
-                          trace=T)
-
-saveRDS(bansforest,file="bans.GF_results.50kb.rds")
-
-#this plot is made with gradientForest package so have to do this in the cluster
-pdf("bans.GF.50kb_A.Overall_Imp_Ranking.pdf")
-plot(bansforest,plot.type="Overall.Importance")
-dev.off()
-```
-
-I'm moving it back to my local computer to better visualize stuff.
-```{bash}
-rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/bans.GF_results.50kb.rds /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA/
-
-rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/bans.GF.50kb_A.Overall_Imp_Ranking.pdf /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA/
-```
-
-```{r}
-bansforest <- readRDS("bans.GF_results.50kb.rds")
-```
-
-try shuffling the order of the predictors and env variables randomly 10 different times to see if the R^2 from your gradient forest is significantly different. especially the magnitude
-
-
-This first plot and most useful from gradientForest is the predictor overall importance plot, which shows a simple barplot of the ranked importances of the physical variables. This shows the mean accuracy importance and the mean importance weighted by SNP R^2. The most reliable importances are the R^2 weighted importances.
-```{r}
-cor(Ebans,method="pearson") %>% write.table("bans.env_corr.table.txt",row.names=T,quote=F,sep="\t")
-cor_matrix <- read.table("bans.env_corr.table.txt", header = TRUE, row.names = 1, sep = "\t")
-
-threshold <- 0.7 
-
-highly_correlated <- which(abs(cor_matrix) > threshold, arr.ind = TRUE)
-
-# remove diagonal to avoid self-correlation
-highly_correlated <- highly_correlated[highly_correlated[, 1] != highly_correlated[, 2], ]
-
-# pairs
-highly_correlated_pairs <- data.frame(
-  Var1 = rownames(cor_matrix)[highly_correlated[, 1]],
-  Var2 = rownames(cor_matrix)[highly_correlated[, 2]],
-  Correlation = cor_matrix[highly_correlated]
-)
-```
-
-
-```{r}
-select_uncorrelated <- function(predictors, cor_matrix, threshold = 0.7, top_n = 4) {
-  # init empty vector
-  selected <- c()
+library(extendedForest)
+for (val in 1:5) {
+  name<-paste("BANS.pop.frq.strat.50k.",val,".txt", sep="")
+  Gbans<- read_delim(paste0("subsample_data/", name))
   
-  for (var in predictors) {
-    # check if uncorrelated w/ all previously selected variables
-    if (length(selected) == 0 || all(abs(cor_matrix[var, selected]) < threshold)) {
-      selected <- c(selected, var)  # select
-    }
-    if (length(selected) == top_n) {
-      break
-    }
-  }
+  Ebans <- read_delim("Bans_env.txt", col_names=T)
   
-  return(selected)
-}
-
-ranked_predictors <- c("bio16", "bio02", "bio12", "bio17", "bioclay", "bio14", "bio13", "bio08", "bio10", "bio07", "bio05", "bio11", "bio04", "bio19", "bio06", "bio18", "bio01", "bio09", "biosand", "bio03")
-
-Ebans_subset <- Ebans[, ranked_predictors, drop = FALSE]
-cor_matrix <- cor(Ebans_subset, method = "pearson")
-colnames(cor_matrix) <- rownames(cor_matrix) <- ranked_predictors
-diag(cor_matrix) <- 1
-top_uncorrelated <- select_uncorrelated(ranked_predictors, cor_matrix, threshold = 0.7, top_n = 5)
-print(top_uncorrelated)
-#WITHOUT LANDSCAPE DATA
-#BIO2 = Mean Diurnal Range (Mean of monthly (max temp - min temp))
-#BIO5 = Max Temperature of Warmest Month
-#BIO7 = Temperature Annual Range (BIO5-BIO6)
-#BIO3 = Isothermality (BIO2/BIO7) (×100)
-
-#WITH THE LANDSCAPE DATA:
-#BIO16 = Precipitation of Wettest Quarter
-#bioclay = g/kg
-#BIO8 = Mean Temperature of Wettest Quarter
-#BIO10 = Mean Temperature of Warmest Quarter
-#BIO11 = Mean Temperature of Coldest Quarter
-
-# Melt for ggplot
-cor_melt <- melt(cor_matrix)
-
-# Plot heatmap
-heatmap <- ggplot(cor_melt, aes(x = Var1, y = Var2, fill = value)) +
-  geom_tile(color = "white") +
-  scale_fill_gradient2(
-    low = "blue",
-    mid = "white",
-    high = "red",
-    midpoint = 0,
-    limit = c(-1, 1),
-    name = "Pearson\nCorrelation"
-  ) +
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
-    panel.grid = element_blank()
-  ) +
-  coord_fixed()
-ggsave("heatmap.png")
-```
-
-```{bash}
-rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/heatmap.png /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA/
-```
-### better way
-So this is going to be making multiple GF models on different subsets of 50k SNPs, and the comparing everything to a permiative null model with random environmental samples to see if the performance is okay.
-
-This is taken an adapted from Caitlin Miller's code: https://github.com/mcaitlinv/cawa-breeding/blob/main/05_au/scripts/gradFor_multiRun.R
-
-
-
-```{r}
-myargs <- commandArgs(trailingOnly=T)
-x <- myargs[1]
-for (val in x) {
-  name<-paste("cawa.16ClimGroup.minInd0.7.majmin4.scaf.noNA.50Krandom", val,".sort", sep="")
-  # gen<-read_delim(paste("results/au/gradientFor/genomeData/", name,".txt", sep=""),delim="\t",col_names = T)
-  # Gcawa<-t(gen)
-  # write.table(Gcawa,paste("results/au/gradientFor/genomeData/", name, ".wide.csv", sep=""),row.names=F,quote=F,sep=",")
-  Gcawa<- read_delim(paste("results/au/gradientFor/genomeData/", name, ".wide.csv", sep=""), delim=",")
-  ##Using each of the sets of 50k random SNPs, make gradientforest model
-  Ecawa <- read_delim("results/au/gradientFor/cawaEnv.220627.txt",delim="\t", col_names=T)
-  ##RE-do name to include date
-  name<-paste("cawa.16ClimGroup.minInd0.7.majmin4.scaf.noNA.50Krandom", val,".sort.220627", sep="")
-  ##Remove lat/long and qscat
-  Ecawa <- Ecawa %>% select(!c( lat, long, qscat))
-  # ##Specify predictors which are the environmentals vars
-  # preds <- colnames(Ecawa)
-  # print(preds)
-  # specs <- colnames(Gcawa)
+  name<-paste("bans.16ClimGroup.minInd0.7.majmin4.scaf.noNA.50Krandom", val,".sort.220627", sep="")
   
-  # nSites <- as.numeric(dim(Gcawa)[1])
-  # nSpecs <- as.numeric(dim(Gcawa)[2])
+  ##Specify predictors which are the environmentals vars
+  preds <- colnames(Ebans)
+  specs <- colnames(Ebans)
+  
+  nSites <- as.numeric(dim(Gbans)[1])
+  nSpecs <- as.numeric(dim(Gbans)[2])
   
   # # set depth of conditional permutation
-  # lev <- floor(log2(nSites*0.368/2))
+  lev <- floor(log2(nSites*0.368/2))
   
+  ##Making the gradient forest model with env as pred and response as genomic sites
+  ##This takes awhile and spits out thousands of lines of errors
+  ##Ignore the errors
+  bansforest=gradientForest(cbind(Ebans,Gbans), 
+                            predictor.vars=preds, 
+                            response.vars=specs, 
+                            ntree=500, transform = NULL, 
+                            compact=T,nbin=101, 
+                            maxLevel=lev,trace=T)
   
-  # ##Making the gradient forest model with env as pred and response as genomic sites
-  # ##This takes awhile and spits out thousands of lines of errors
-  # ##Ignore the errors
-  # cawaforest=gradientForest(cbind(Ecawa,Gcawa), predictor.vars=preds, response.vars=specs, ntree=500, transform = NULL, compact=T,nbin=101, maxLevel=lev,trace=T)
-  
-  # saveRDS(cawaforest, file = paste("results/au/gradientFor/cawaforest", name,".rds", sep=""))
-  cawaforest<-readRDS(paste("results/au/gradientFor/cawaforest", name,".rds", sep=""))
+  saveRDS(bansforest, file = paste("results/GF_outputs/bansforest", name,".rds", sep=""))
+  bansforest<-readRDS(paste("results/GF_outputs/bansforest", name,".rds", sep=""))
   #Check predictor importance
-  # allpredictors=names(importance(cawaforest))
-  # ##Save as pdf 
-  # pdf(paste("results/au/gradientFor/output/", name, ".importance.pdf", sep=""))
-  # plot(cawaforest,plot.type="O")
-  # dev.off()
+  allpredictors=names(importance(bansforest))
+  ##Save as pdf 
+  pdf(paste("results/GF_outputs/", name, ".importance.pdf", sep=""))
+  plot(bansforest,plot.type="O")
+  dev.off()
   
-  # ##Check for correlation in variables
-  # ##Aiming to take the top 10 variables and pare down until max number of variables with corr <0.7
-  # cor<-cor(Ecawa,method="pearson")
-  # cor %>% write.table(paste("results/au/gradientFor/tables/", name, ".corr", sep=""),quote=F,sep="\t",row.names=T)
+  ##Check for correlation in variables
+  ##Aiming to take the top 10 variables and pare down until max number of variables with corr <0.7
+  cor<-cor(Ebans,method="pearson")
+  cor %>% write.table(paste("results/GF_outputs/", name, ".corr", sep=""),quote=F,sep="\t",row.names=T)
   
   ##Start randomization to check how accurate model is
-  realtotal=cawaforest$species.pos.rsq
-  realaverage=sum(cawaforest$result)/realtotal
-  
+  realtotal=bansforest$species.pos.rsq
+  realaverage=sum(bansforest$result)/realtotal
   
   #Create randomization values for 100 different runs of random values
   #Paste into table
   for (i in 1:100) {
     ##Sample randomly the rows of the environment
-    predsR=Ecawa[sample(nrow(Ecawa)),]
+    predsR=Ebans[sample(nrow(Ebans)),]
   
     ##Build your model with the randomly sampled rows of the environment
     ##These will be mismatched to the rows of genomic data, thereby randomizing your predictors
-    cawaforestR=gradientForest(cbind(predsR,Gcawa), predictor.vars=colnames(predsR), response.vars=colnames(Gcawa), ntree=100, transform = NULL, compact=F, maxLevel=1,trace=F)
+    bansforestR=gradientForest(cbind(predsR,Gbans), predictor.vars=colnames(predsR), response.vars=colnames(Gbans), ntree=100, transform = NULL, compact=F, maxLevel=1,trace=F)
     ##Find the random total r-sq and average r-sq
-    randtotal=cawaforestR$species.pos.rsq
-    randaverage=sum(cawaforestR$result)/randtotal
+    randtotal=bansforestR$species.pos.rsq
+    randaverage=sum(bansforestR$result)/randtotal
   
     ##Write random values into tables
-    write.table(randtotal,file=paste("results/au/gradientFor/tables/",name,"bslmm.nobin.randtotal",sep=""),row.names=FALSE,col.names=FALSE,append=T)
-    write.table(randaverage,file=paste("results/au/gradientFor/tables/",name,"bslmm.nobin.randaverage",sep=""),row.names=FALSE,col.names=FALSE,append=T)
+    write.table(randtotal,file=paste("results/GF_outputs/",name,"bslmm.nobin.randtotal",sep=""),row.names=FALSE,col.names=FALSE,append=T)
+    write.table(randaverage,file=paste("results/GF_outputs/",name,"bslmm.nobin.randaverage",sep=""),row.names=FALSE,col.names=FALSE,append=T)
   }
   
   ##Read in the 500 random averages and r-squareds
-  randa=read.table(paste("results/au/gradientFor/tables/",name,"bslmm.nobin.randtotal",sep=""))
-  randt=read.table(paste("results/au/gradientFor/tables/",name,"bslmm.nobin.randaverage",sep=""))
+  randa=read.table(paste("results/GF_outputs/",name,"bslmm.nobin.randtotal",sep=""))
+  randt=read.table(paste("results/GF_outputs/",name,"bslmm.nobin.randaverage",sep=""))
  
   quantile(randa$V1,c(0.995))
   
@@ -530,17 +392,92 @@ for (val in x) {
 
   abline(v=realaverage,col="red")
   ##Make a graph showing the distribution of randoms
-  pdf(paste("results/au/gradientFor/output/", name, ".randomization.hist.par.pdf", sep=""))
+  pdf(paste("results/GF_outputs/", name, ".randomization.hist.par.pdf", sep=""))
   par(mfrow=c(2,1))
   hist(randa$V1,main="Average R-squared of Random Gradient Forests",xlab="Average R-squared of SNPs", xlim =c(0.09, 0.18))
   abline(v=realaverage,col="red") #replace with your actual number from realaverage
   dev.off()
  }
+```
 
+## Comparing across models
+Now we have stats for each model, let's compare across models. We hope that it's pretty consistent! ChatGPT is going to make this code for me.
 
-````
+```{r}
+model_dir <- "results/GF_outputs/"
 
+# initialize results storage
+gf_summary <- data.frame(
+  subset = integer(),
+  mean_rsq = numeric(),
+  sd_rsq = numeric(),
+  total_rsq = numeric(),
+  top_predictor = character(),
+  top_importance = numeric(),
+  stringsAsFactors = FALSE
+)
 
+# loop through the 5 GF models you created
+for (val in 1:5) {
+  
+  name <- paste0("bans.16ClimGroup.minInd0.7.majmin4.scaf.noNA.50Krandom", val, ".sort.220627")
+  model_file <- paste0(model_dir, "bansforest", name, ".rds")
+  
+  if (!file.exists(model_file)) {
+    message("Skipping missing file: ", model_file)
+    next
+  }
+  
+  # load model
+  gf <- readRDS(model_file)
+  
+  # compute key metrics
+  rsq_vals <- gf$species.pos.rsq
+  mean_rsq <- mean(rsq_vals, na.rm = TRUE)
+  sd_rsq   <- sd(rsq_vals, na.rm = TRUE)
+  total_rsq <- sum(rsq_vals, na.rm = TRUE)
+  
+  # predictor importance
+  imp <- importance(gf)
+  imp_sorted <- sort(imp, decreasing = TRUE)
+  top_pred <- names(imp_sorted)[1]
+  top_imp  <- imp_sorted[1]
+  
+  # store summary
+  gf_summary <- rbind(
+    gf_summary,
+    data.frame(
+      subset = val,
+      mean_rsq = mean_rsq,
+      sd_rsq = sd_rsq,
+      total_rsq = total_rsq,
+      top_predictor = top_pred,
+      top_importance = top_imp,
+      stringsAsFactors = FALSE
+    )
+  )
+  
+  # save importance table for each model
+  write.table(
+    data.frame(Predictor = names(imp_sorted), Importance = imp_sorted),
+    file = paste0(model_dir, "importance_rank_", val, ".txt"),
+    sep = "\t", quote = FALSE, row.names = FALSE
+  )
+}
 
+# write summary table
+write.table(gf_summary,
+            file = paste0(model_dir, "GF_subset_summary.txt"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
 
+# plot quick comparison
+ggplot(gf_summary, aes(x = factor(subset), y = mean_rsq)) +
+  geom_point(size = 3) +
+  geom_line(aes(group = 1)) +
+  theme_bw() +
+  labs(x = "Subset number", y = "Mean R² across SNPs",
+       title = "Gradient Forest model performance across SNP subsets")
+
+print(gf_summary)
+```
 

@@ -18,8 +18,413 @@ The pipeline has five stages:
 5. Compute genomic offset (Euclidean distance between predictions)
 6. Smooth and visualize offset maps
 
-# 1. Prepare Environmental Data
-So here we have to manage both current data and future, projected data. We are also going to need to randomly pull spatial points across the study area to serve as a background. A couple things
+Notes:
+Going to be using all adaptive loci as multiple papers have shown that using all loci isn't significantly different from using just adaptive loci. This also aligned better with the exclusion of landscape data (which I used for calling adaptive loci) as I don't have predictions for future landscape characteristics.
 
-## current data
-L
+# 1. Prepare Environmental Data
+Accessing the current and future sample, randomly sampling points, and using that information to run GF variable selection.
+
+## Getting Data Together
+```{r, label="spatial_library"}
+library(terra)
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(rnaturalearth)
+library(rnaturalearthdata)
+#for reproducibility during "random" processes
+set.seed(1234)
+```
+
+So, I'm going to go through all of this will a relatively small environmental samples of 10,000 for the sake of getting the code to run. Then go back and update with more thorough sampling. Using a random approach.
+
+Current Data:
+```{r, label="current_env_data"}
+# files<-list.files("../../data/spatial_files/worldclim2.0/")
+# files_tif <- grep("^wc2\\.0.*\\.tif$", files, value = TRUE)
+# files_sorted <- files_tif[order(as.numeric(sub(".*_([0-9]+)\\.tif", "\\1", files_tif)))]
+# 
+# bio_list <- list()
+# for (i in seq_along(files_sorted)) {
+#   file_path <- paste0("../../data/spatial_files/worldclim2.0/", files_sorted[i])
+#   r <- terra::rast(file_path)
+#   
+#   fname <- tools::file_path_sans_ext(basename(files_sorted[i]))
+#   bionum <- sub(".*_", "", fname)
+#   clean_name <- paste0("bio",bionum)
+#   names(r) <- clean_name
+#   
+#   bio_list[[clean_name]] <- r
+#   print(ext(bio_list[[clean_name]]))
+#   print(paste(clean_name, "loaded from", files_sorted[i]))
+# }
+# 
+# # Stack all rasters into one SpatRaster
+# worldclim_terra <- terra::rast(bio_list)
+# 
+# bans.range <- st_read("../../data/spatial_files/banswa_range_2023/banswa_prediction-area_2023.gpkg") %>% filter(season=="breeding")
+# worldclim_terra_mask <- mask(worldclim_terra, bans.range)
+# landscape=st_as_sf(ne_countries(scale="medium",continent="north america"))
+# worldclim_terra_mask.NA <- mask(worldclim_terra_mask, landscape)
+
+#writing the output so I don't have to go through the above stuff again
+# writeRaster(worldclim_terra_mask.NA, filename="../../data/spatial_files/worldclim2.0/BANS_range_NA_wordclim_stack.tif", filetype = "GTiff", datatype = "FLT4S")
+
+worldclim_terra_mask.NA <- rast("../../data/spatial_files/worldclim2.0/BANS_range_NA_wordclim_stack.tif")
+
+#getting the cells that don't have NA values so I'm actually sampling data
+valid_cells <- which(!is.na(values(worldclim_terra_mask.NA$bio01)))
+
+#convert cells to coordinates and randomly sample
+coords <- xyFromCell(worldclim_terra_mask.NA, valid_cells)
+coords.sample <- coords[sample(1:nrow(coords), size = 50000, replace = FALSE), ]
+write.table(coords.sample, "data/coords_sample_50k.tsv")
+
+#extracting current data for those coords, add the coordinates back in, save this.
+envc.extract <- extract(worldclim_terra_mask.NA, coords.sample)
+envc <- cbind(coords.sample, envc.extract)
+write.table(envc, "data/BANS_envc_50k.tsv")
+```
+
+Future Data:
+```{r, label="future_env_data"}
+r <- rast("../../data/spatial_files/worldclim2.0/wc2.1_2.5m_bioc_CanESM5_ssp126_2041-2060.tif")
+
+#renaming the stack to the bio variables so it's easier to use
+for (i in seq_along(1:19)) {
+  fname <- names(r)[i]
+  bionum <- sub(".*_", "", fname)
+  clean_name <- sprintf("bio%02d", as.numeric(bionum))
+  names(r)[i] <- clean_name
+}
+
+#this runs fast so not saving the output raster
+r_mask <- mask(r, bans.range)
+landscape=st_as_sf(ne_countries(scale="medium",continent="north america"))
+r_mask.NA <- mask(r_mask, landscape)
+
+envf.extract <- extract(r_mask.NA, coords.sample)
+envf <- cbind(coords.sample, envf.extract)
+write.table(envf, "data/BANS_envf_50k.tsv")
+```
+
+## Picking Predictors
+I'm going to try three methods for this.
+1. standard GF selection
+2. basic RDA selection
+3. RDAForest selection
+4. forcing biological variables
+
+### 1. standard GF selection
+Please reference 03.1.gradeint_forest.Rmd for methodology to get the following variables:
+BIO2 = Mean Diurnal Range (Mean of monthly (max temp - min temp))
+BIO5 = Max Temperature of Warmest Month
+BIO7 = Temperature Annual Range (BIO5-BIO6)
+BIO3 = Isothermality (BIO2/BIO7) (×100)
+
+Same approach as what I used to get the best predictors for the RDA of adaptive loci.
+
+Get per population allele frequency, run the GF variable selection against the climate data. Please note, not including the landscape data here as I have to future predictions for this, so variables are slightly different than for adaptive loci selection. This should be fine as I'm using all loci, not just adaptive.
+
+### 2. basic RDA selection
+
+
+### 3. RDAForest selection
+Please reference the 06b.RDAForest_offset.Rmd for these variables. This was run on the full SNP set (on the cluster, so not the subsample set that is run in the .Rmd), using their mtry method. Also important is that this incorporated a correction for IBD, which the other method's don't.
+
+BIO19 = Precipitation of Coldest Quarter
+BIO14 = Precipitation of Driest Month
+BIO17 = Precipitation of Driest Quarter
+BIO7 = Temperature Annual Range (BIO5-BIO6)
+BIO9 = Mean Temperature of Driest Quarter
+BIO3 = Isothermality (BIO2/BIO7) (×100)
+
+### Variable summary
+Bio07 and 03, so Temperature Annual Range and Isothermality are the two variables that overlap between the GF and RDAForest methods.
+
+# 2. Prepare genotype–environment model
+```{r}
+library(tidyverse)
+library(data.table)
+library(gradientForest)
+```
+
+So, I'm going to read in the model that I made during my original GF model run. NOTE: I NEED TO DOUBLE CHECK THAT THIS WAS RUN WITH ALL THE SNPS AND NOT A SUBSET.
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/bans.GF_results.50kb.rds /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/06.genomic_offset/data
+
+mv bans.GF_results.50kb.rds
+```
+
+# 3. Project GF predictions spatially (current climate)
+Using the already make GF model to do this, testing with the two different sets of variables.
+
+## preparing data
+```{r}
+#load environmental data
+envc <- read.table("data/BANS_envc_50k.tsv") %>% rename(long=x, lat=y)
+
+#define the predictor variables
+pred.GF <- c("bio02", "bio05", "bio07", "bio03")
+pred.RDAForest <- c("bio19", "bio14", "bio17", "bio07", "bio09", "bio03")
+
+#load the model
+gradientforest_model <- read_rds("data/bans.GF_results.50kb.rds")
+```
+
+### Some quick stats on the GF model...
+*should've done this with the original model*
+```{r}
+# per-locus importance
+summary(gradientforest_model$imp.rsq)
+hist(gradientforest_model$imp.rsq, breaks = 30, main = "Distribution of per-SNP R²")
+```
+
+So, lot's of SNPs with a R2 of zero, which kind of makes sense because we expect most SNPs to be uninformative. But, not getting any SNPs with high R2 values...
+
+```{r}
+# How good is the model?
+imp_df <- as.data.frame(gradientforest_model$imp.rsq) %>%
+  rownames_to_column(var = "Environmental_Variable") 
+
+# pivot longer to get SNPs in a long format
+imp_long <- imp_df %>%
+  pivot_longer(cols = -Environmental_Variable, 
+               names_to = "SNP", 
+               values_to = "R2")
+
+mean_r2 <- imp_long %>% filter(R2 > 0) %>% summarise(mean_r2 = mean(R2))
+mean_r2
+```
+Mean R2 for the overall model is super low, only explaining 1.2% of the variation seen. So, this is bad.
+
+Running through some comparison's will null models...
+* Can't do this right now because I need to update the above to have all the actual data... should've done this with the original model*
+```{r}
+# comparing to using random environmental data...
+env_random <- as.data.frame(matrix(rnorm(nrow(envc) * ncol(envc)), 
+                                   nrow = nrow(envc)))
+names(env_random) <- names(envc)[-1]
+gf_rand <- gradientForest(data = cbind(env_random, gf_data_resp %>% select(-pop)),
+                          predictor.vars = names(env_random),
+                          response.vars = response.names,
+                          ntree = 500)
+```
+
+## current spatial prediction for GEA
+
+### Gradient forest predictors:
+```{r}
+# predict for current
+pred_current.GF <- predict(gradientforest_model, envc[, pred.GF])
+```
+
+### RDAForest predictors:
+```{r}
+# predict for current
+pred_current.RDAForest <- predict(gradientforest_model, envc[, pred.RDAForest])
+```
+
+# 4. Project under future climate scenarios
+
+## preparing data
+```{r}
+envf <- read.table("data/BANS_envf_50k.tsv") %>% rename(long=x, lat=y)
+```
+
+## future spatial predictions for GEA
+### Gradient forest predictors:
+```{r}
+# predict for current
+pred_future.GF <- predict(gradientforest_model, envf[, pred.GF])
+```
+
+#### Stats for GF
+
+```{r}
+# distribution summaries
+apply(pred_current.GF, 2, range)
+apply(pred_future.GF, 2, range)
+boxplot(pred_current.GF, main="Current GF-transformed environment")
+boxplot(pred_future.GF, main="Future GF-transformed environment")
+```
+Some shifting, which is promising...
+
+### RDAForest predictors:
+```{r}
+# predict for current
+pred_future.RDAForest <- predict(gradientforest_model, envf[, pred.RDAForest])
+```
+
+# 5. Compute genomic offset (Euclidean distance between predictions)
+## Gradient forest predictors:
+```{r}
+offset_vec.GF <- sqrt(rowSums((pred_current.GF - pred_future.GF)^2, na.rm = TRUE))
+```
+
+## RDAForest predictors:
+```{r}
+offset_vec.RDAForest <- sqrt(rowSums((pred_current.RDAForest - pred_future.RDAForest)^2, na.rm = TRUE))
+```
+
+# 6. Smooth and visualize offset maps
+
+## GF offset
+```{r}
+# run PCA on your environmental variables
+PCs <- prcomp(envc[, pred.GF], center = TRUE, scale. = TRUE)
+
+# extract principal component scores
+a1 <- PCs$x[,1]
+a2 <- PCs$x[,2]
+a3 <- PCs$x[,3]
+
+# convert PCs to RGB color values
+r <- a1 + a2
+g <- -a2
+b <- a3 + a2 - a1
+
+# normalize values to 0-255 range
+r <- (r - min(r)) / (max(r) - min(r)) * 255
+g <- (g - min(g)) / (max(g) - min(g)) * 255
+b <- (b - min(b)) / (max(b) - min(b)) * 255
+
+# create RGB colors
+loshcols <- rgb(r, g, b, max = 255)
+loshcols2 <- col2rgb(loshcols)
+loshcols3 <- t(loshcols2)
+
+# bind colors with lat/long data
+gradients <- cbind(envc[, c("long", "lat")], loshcols3)
+
+# view first few rows
+head(gradients)
+```
+
+```{r, fig.cap = "A principal component plot of the top 4 uncorrelated variables"}
+# create a biplot
+nvs <- dim(PCs$rotation)[1]
+vec <- envc[, pred.GF]  # Updated to match your variables
+lv <- length(vec)
+vind <- rownames(PCs$rotation) %in% vec
+scal <- 1
+
+#set x and y ranges for the plot
+xrng <- range(PCs$x[, 1], PCs$rotation[, 1] / scal) * 1
+yrng <- range(PCs$x[, 2], PCs$rotation[, 2] / scal) * 1
+
+# plot the PCA points colored by LOSH-based RGB values
+plot(PCs$x[, 1:2], xlim = xrng, ylim = yrng, pch = ".", cex = 4, 
+     col = rgb(r, g, b, max = 255), asp = 1)
+
+# add variable loadings
+points(PCs$rotation[!vind, 1:2] / scal, pch = "+")
+arrows(rep(0, lv), rep(0, lv), PCs$rotation[vec, 1] / scal, 
+       PCs$rotation[vec, 2] / scal, length = 0.0625)
+
+# label variable vectors with slight jitter
+jit <- 0.0015
+text(PCs$rotation[vec, 1] / scal + jit * sign(PCs$rotation[vec, 1]), 
+     PCs$rotation[vec, 2] / scal + jit * sign(PCs$rotation[vec, 2]), 
+     labels = vec)
+```
+```{r}
+### try making the gf map again
+
+library(sf)
+library(sp)
+library(ggplot2)
+library(ggspatial)
+library(dplyr)
+library(rnaturalearth)
+
+# download layers from Natural Earth
+coastlines <- ne_download(scale = 50, type = "coastline", category = "physical", destdir = tempdir())
+countries <- ne_download(scale = 50, type = "countries", category = "cultural", returnclass = "sf")
+
+# filter for the US and Canada
+na_countries <- countries %>%
+  filter(ADMIN %in% c("United States of America", "Canada"))
+#%>% st_transform("+proj=robin +lon_0=-100")
+
+# plot the initial map to check the extent and features
+mapg <- ggplot() +
+  geom_sf(data = na_countries, fill = "grey") +
+  theme_bw()
+mapg
+
+# project and crop the map for the region of interest, here using Lambert Conformal Conic (LCC) projection
+lamproj <- "+proj=lcc +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-100 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+
+# assuming your `current_grid` has columns 'long', 'lat', and RGB columns (r, g, b):
+
+# convert RGB values from your analysis
+loshcols <- rgb(r, g, b, max = 255)
+loshcols2 <- col2rgb(loshcols)
+loshcols3 <- t(loshcols2)
+
+# combine coordinates with RGB values
+gradients <- cbind(envc[c("long", "lat")], loshcols3)
+loshmap <- gradients
+
+# set spatial coordinates and projection for the gradient map
+coordinates(loshmap) <- ~long + lat
+proj4string(loshmap) <- CRS("+proj=longlat +datum=WGS84")
+
+# plot the map with the gradient forest model for Loggerhead Shrike
+rectangled <- ggplot() +
+  geom_sf(data = na_countries, fill = NA) +
+  ggspatial::layer_spatial(loshmap, col = rgb(r, g, b, max = 255), pch = 15) + 
+  xlab("Longitude") + ylab("Latitude") +
+  coord_sf(crs = "+proj=eqearth +lon_0=-100")
+
+# display the map
+rectangled
+```
+
+```{r}
+#-----------------------------------------------
+# 1. Get basemap (US + Canada)
+#-----------------------------------------------
+countries <- ne_download(
+  scale = 50, 
+  type = "countries", 
+  category = "cultural", 
+  returnclass = "sf"
+)
+
+na_countries <- countries %>%
+  filter(ADMIN %in% c("United States of America", "Canada"))
+
+#-----------------------------------------------
+# 2. Example: your genomic offset data
+#-----------------------------------------------
+offset_df <- cbind(envc[, c("long", "lat")], offset = offset_vec.RDAForest)
+
+offset_sf <- st_as_sf(offset_df, coords = c("long", "lat"), crs = 4326)
+
+#-----------------------------------------------
+# 3. Plot with color gradient (green → red)
+#-----------------------------------------------
+ggplot() +
+  geom_sf(data = na_countries, fill = "grey95", color = "grey60") +
+  geom_sf(data = offset_sf, aes(color = offset), size = 1) +
+  scale_color_gradient(
+    name = "Genomic offset",
+    low = "green",
+    high = "red",
+    na.value = "transparent"
+  ) +
+  coord_sf(crs = "+proj=eqearth +lon_0=-100") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_line(color = "grey90"),
+    panel.background = element_rect(fill = "aliceblue"),
+    axis.title = element_text(size = 12)
+  ) +
+  labs(x = "Longitude", y = "Latitude")
+
+
+```
+
