@@ -3,6 +3,7 @@
 .RData
 .Ruserdata
 data/
+analysis/01.fastq_processing/snakemake/*.fna*
 analysis/03.GEA/pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenval
 analysis/03.GEA/pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenvec
 analysis/03.GEA/results/
