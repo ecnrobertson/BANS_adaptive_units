@@ -72,11 +72,8 @@ pip install snakemake-executor-plugin-cluster-generic
 
 ## getting the 2024 .bams and .gvcf over
 
-```{r}
+```{bash}
 rclone copy -P --tpslimit 10 --fast-list SharePoint:/Genetic_and_Environmental_Data/Species_genetic_data/BANS/snakemake-results-May2024/bqsr-round-0/overlap_clipped/ /scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0
-
-rsync -avzP 
-
 ```
 
 ## creating units files
@@ -393,8 +390,6 @@ conda activate snakemake-8.20.4
 snakemake -p --profile hpcc-profiles/slurm/alpine --configfile example-configs/LOSH-Apr-25/config.yaml --until make_gvcf_sections --rerun-incomplete
 ```
 
-This times out, but getting a qos=long isn't really an option with priority as low as mine. So, my approach is to just run this a bunch of times (unlocking it between runs) and including a --rerun-incomplete flag to remake any weird files from before. Theoretically, this will reduce the number of jobs each time and, eventually, it will finish. Update: this is taking 4+ days? Seems like a long time to me, but the number of jobs is steadily decreasing.
-
 ## getting the other files over
 Had to reconfig a new remote to get rclone to work...
 
@@ -402,67 +397,12 @@ This is within the vcf_2024/ which I made just to store this. When the other sna
 ```{bash}
 rclone copy -P --tpslimit 10 --fast-list remote2:/Genetic_and_Environmental_Data/Species_genetic_data/BANS/snakemake-results-May2024/bqsr-round-0/gvcf_6x ./
 ```
-October 28th:
-Job stats:
-job                   count
-------------------  -------
-make_gvcf_sections     2517
-thin_bam                 27
-total                  2544
-
-October 29th:
-Job stats:
-job                   count
-------------------  -------
-make_gvcf_sections     2373
-thin_bam                 26
-total                  2399
-
-November 1st:
-Job stats:
-job                   count
-------------------  -------
-make_gvcf_sections     2253
-thin_bam                 22
-total                  2275
-
-November 2st:
-Job stats:
-job                   count
-------------------  -------
-make_gvcf_sections     2139
-thin_bam                 22
-total                  2161
-
-The make_gvcf_sections is the problem. It's taking forever for each section... for example
-s       h:m:s   max_rss max_vms max_uss max_pss io_in   io_out  mean_load       cpu_time
-7894.6056       2:11:34 2418.89 9107.74 2393.25 2394.53 0.00    5.04    98.49   7776.80
-s       h:m:s   max_rss max_vms max_uss max_pss io_in   io_out  mean_load       cpu_time
-16703.8784      4:38:23 2624.54 8904.11 2600.87 2601.95 0.00    62.68   102.12  17057.94
-
-Running everything in the headnode now, with the hpcc configeration so it's running multiple jobs in parallele. Still taking forever but there's fewer jobs...
-November 7th:
-Job stats:
-job                   count
-------------------  -------
-make_gvcf_sections     1415
-thin_bam                 22
-total                  1437
-
-ls results/bqsr-round-0/gvcf_sections/* |wc -l
-3265
-
-Trying to see how many of the sections it's gone through because the number of samples hasn't increased past 50... hopefully tomorrow the 3265 will go up.
-
-Ah but I see now that some of the jobs might be timing out! This is so frustrating. I'll check again at the end of the day and if none of the jobs seem to be completing I'll give them back the full time (24 hours instead of 12). Seems like lots of sections would finish in time (based on a couple of benchmark files) but that some take a lot longer. So maybe I just run it out on the ones that can finish and once those cap out go back and up the time for what's left...
-
-A couple hours later:
-ls results/bqsr-round-0/gvcf_sections/* |wc -l
-3461
 
 Yay, that all finished! So I concatted all of them with a quick snakemake rule to get the new ones to g.vcf.gz and then moved the vcf_2024 files over. I touched everything and started a new snakemake run that should put all the files to the end.
 
+```{bash}
 snakemake -p --profile hpcc-profiles/slurm/alpine --configfile example-configs/LOSH-Apr-25/config.yaml --rerun-incomplete -np
+```
 
 running this through sbatch this time to be well behaved (although they haven't emailed me to stop running stuff in the head node so...).
 
@@ -499,6 +439,7 @@ bcftools view --threads 16 \
 bcftools index --threads 16 vcf_final/BANS.all.ds6x.pass-maf-0.05.vcf.gz
 ```
 
+# Final Filtering
 Then I need to do some additional filtering on that file...
 ```{bash}
 #!/bin/bash
@@ -545,7 +486,7 @@ java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /c
 conda activate bioinf
 
 ###VCFtools for filtering
-vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.vcf --out $OUT/BANS.all.ds6x_gatk.SNP.05maf --min-alleles 2 --max-alleles 2 --max-missing 0.5 --maf 0.05 --recode
+vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.vcf --out $OUT/BANS.all.ds6x_gatk.SNP.05maf --min-alleles 2 --max-alleles 2 --max-missing 0.5 --maf 0.05 --recode --recode-INFO-all
 
 conda activate gatk_4
 
@@ -553,7 +494,7 @@ conda activate gatk_4
 
 java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /curc/sw/install/bio/gatk/4.3.0.0/gatk-package-4.3.0.0-local.jar VariantFiltration \
 -R $REFERENCE \
--V $OUT/BANS.all.ds6x_gatk.SNP.05maf \
+-V $OUT/BANS.all.ds6x_gatk.SNP.05maf.recode.vcf \
 -filter "QUAL < 30.0" --filter-name "QUAL30" \
 -filter "SOR > 3.0" --filter-name "SOR3" \
 -filter "FS > 60.0" --filter-name "FS60" \
@@ -568,14 +509,44 @@ java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /c
      -R $REFERENCE \
      -V $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.vcf \
      --exclude-filtered  true \
-     -O $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf
-
+     -O $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vc
 
 conda activate bioinf
 
 ##VCFtools for filtering based on missingness, once you remove systematic errors. Play around with this to get the numbers you want and make sense
-vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --out $OUT/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz --max-missing 0.8 --recode
+vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --out $OUT/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf --max-missing 0.8 --recode --recode-INFO-all
 ```
 
+Yay! Head on over to vcf_eval to do some tests for batch effects and missingness stuff.
 
+## filtering for individual level missingness before loci level 
 
+From within vcf_file. Will this give me more loci? Theoretically, having high missing indv would bias the missingness at loci level to a higher level so they would get filtered out. So dropping high indv missing would result in more snps.
+
+```{bash}
+vcftools --vcf BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --missing-indv
+# filter out those individuals missing more than 30% of genome wide information
+<!-- After filtering, kept 229 out of 229 Individuals -->
+<!-- Outputting Individual Missingness -->
+<!-- After filtering, kept 9722479 out of a possible 9722479 Sites -->
+
+#filt ind with higher than 50% overall missingness
+awk 'NR>1 && $5 > 0.5 {print $1}' out.imiss > bad_ind
+wc -l bad_ind
+
+# then filter SNP level missingness
+vcftools --vcf BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --remove bad_ind --out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss --max-missing 0.8 --recode --recode-INFO-all
+
+<!-- After filtering, kept 215 out of 229 Individuals -->
+<!-- Outputting VCF file... -->
+<!-- After filtering, kept 4069269 out of a possible 9722479 Sites -->
+
+vcftools --vcf BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss.recode.vcf --missing-indv
+
+bcftools stats BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss.recode.vcf > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss.recode.stats
+
+awk 'NR>1 {sum += (1-$5)} END {print sum/NR}' out.imiss
+#0.850813
+```
+
+That is, in fact, what happened! 4069269 with this type of filtering. 215 samples left.
