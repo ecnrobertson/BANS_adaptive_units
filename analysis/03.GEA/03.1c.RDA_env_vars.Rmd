@@ -24,11 +24,11 @@ library(geosphere)
 #DEFINING POPULATIONS
 So I've already put together the environmental data for each individual, that was done within the 01b.spatial_data.Rmd script.
 ```{r, message=FALSE, warning=FALSE}
-meta <- read.delim("../../data/spatial_files/BANS.initial.worldclim.txt")
+meta <- read.delim("../../data/BANS.CHELSA.soil.landscape.txt")
 ```
 
 ```{r}
-coords <- meta %>% select(Long, Lat)
+coords <- meta %>% dplyr::select(Long, Lat)
 coords_proj <- st_as_sf(meta, coords = c("Long", "Lat"), crs="+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
 ```
 
@@ -61,20 +61,19 @@ Now we're loading in the environmental data that we got earlier.
 
 So this is getting together the climate data for each population and filtering to pops (clusters) that have more than 4 samples. In my case this doesn't remove anything so it's fine.
 ```{r}
-library(tidyverse)
-pops <- read.table(file = "BANS_sample_list_pop.tsv", sep="\t", header = FALSE) %>% rename(BGP_ID = V1, Pop = V3) %>% dplyr::select(BGP_ID, Pop)
+# clim <- meta.sub %>%
+#   dplyr::select(starts_with("bio"), sand, clay, Class_EN, Pop) %>%
+#   group_by(Pop) %>% 
+#   summarise(
+#     n = n(),
+#     across(starts_with("bio"), mean, .names = "{.col}"),
+#     biosand = mean(sand, na.rm = TRUE),
+#     bioclay = mean(clay, na.rm = TRUE),
+#     bioclass = as.factor(Class_EN)
+#   ) %>% 
+#   filter(n > 4)
 
-clim <- read_delim("../../data/BANS.initial.worldclim.landscape_edit.txt", delim = "\t") %>% 
-  left_join(pops, by = "BGP_ID") %>%
-  dplyr::select(starts_with("bio"), sand, clay, Pop) %>%
-  group_by(Pop) %>% 
-  summarise(
-    n = n(),
-    across(starts_with("bio"), mean, .names = "{.col}"),
-    biosand = mean(sand, na.rm = TRUE),
-    bioclay = mean(clay, na.rm = TRUE)
-  ) %>% 
-  filter(n > 4)
+clim <- meta.sub
 ```
 
 The populations file you create earlier in this markdown, and provide to plink to calculate allele frequencies within are almost certainly in the same order as the plink allele frequencies output. But just to be safe, I extract the order the populations are listed from the plink population allele frequency file, so that we can list the environmental predictors in the same order. Here is the command.
@@ -87,37 +86,36 @@ rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacn
 ```
 
 ```{r}
-## reorder so that env and alle frequencies per pop are reported in the same order
+## reorder so that env and allele frequencies per pop are reported in the same order
 poporder <- read.table(file = "BANS-frq-pop-order.txt", header = F) %>% rename(Pop = V1)
-clim_ordered <- poporder %>% left_join(clim) %>% dplyr::select(-n)
+clim_ordered <- poporder %>% left_join(clim) %>% select(-ClimGroup, -GroupID)
 
 write.table(clim_ordered, file = "Bans_env_pop.txt", row.names=F, quote=F, sep="\t")
 ```
 
 # RUNNING THE FORWARD SELECTION
 ```{r}
-env <- read_delim("../../data/spatial_files/BANS.initial.worldclim.txt", delim = "\t")
+env <- clim_ordered
+long_lat<-env %>% dplyr::select(Long,Lat)
 
-env <- left_join(indorder, env, by = "BGP_ID")
+#skipping the last column which doesn't have any values
+pred <- env[,3:37]
+pred.vars <- colnames(pred[,c(-1,-2)])
 
-env$BGP_ID == indorder$BGP_ID
+pred[, pred.num] <- scale(env[, pred.num], center = TRUE, scale = TRUE) # center=TRUE, scale=TRUE are the defaults for scale()
 
-long_lat<-pops.latlong %>% dplyr::select(Long,Lat)
-
-pred <- env %>% dplyr::select(bio01:bio19)
-pred <- scale(pred, center=TRUE, scale=TRUE) # center=TRUE, scale=TRUE are the defaults for scale()
-pred2<-as.data.frame(pred)
-rownames(pred2) <- env$BGP_ID
+rownames(pred) <- env$BGP_ID
 
 genotypes <- fread("/Users/ericarobertson/Desktop/BANS_adaptive_units/data/subsampled_noheader.raw")
-genotypes.clean <- genotypes[,-(1:6)]
+genotypes.filt <- genotypes %>% filter(genotypes$FID %in% env$BGP_ID)
+genotypes.clean <- genotypes.filt[,-(1:6)]
 rownames(genotypes.clean) <- genotypes$FID 
 
 bans.mod0 <- rda(genotypes.clean  ~ 1, pred2) # Model with intercept only
 bans.rda.all <- rda(genotypes.clean ~ bio01+bio02+bio03+bio04+
                       bio05+bio06+bio07+bio08+bio09+bio10+
                       bio11+bio12+bio13+bio14+bio16+
-                      bio17+bio18+bio19, pred2) # Model with all explanatory variables
+                      bio17+bio18+bio19, pred) # Model with all explanatory variables
 saveRDS(bans.rda.all,"results/BANS.RDAresutls..all_env_b4_varsel.RDS")
 #bans.rda.all<-readRDS("bans.RDAresutls.109Indiv_impute.all_env_b4_varsel.RDS")
 
@@ -185,9 +183,4 @@ ggplot() +
   theme_bw(base_size = 11, base_family = "Times") +
   theme(panel.grid = element_blank(), plot.background = element_blank(), panel.background = element_blank(), strip.text = element_text(size=11))
 dev.off()
-
-
-
-
-
 ```

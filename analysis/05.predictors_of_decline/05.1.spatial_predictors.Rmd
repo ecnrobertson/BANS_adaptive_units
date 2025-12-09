@@ -6,12 +6,18 @@ output: html_document
 This is going to wrangling the spatial data I want to include in my GAMM model for predicting decline in Bank Swallow.
 # Libraries
 ```{r}
+library(ncdf4)
 library(terra)
-library(tidyverse)
+library(raster)
+library(dplyr)
+library(purrr)
 library(data.table)
+library(ebirdst)
+library(fields)
+library(rnaturalearth)
 library(sf)
-library(ggplot2)
 ```
+
 # Land Cover
 ## All North America?
 NA_NALCMS_landcover_2020v2_30m.tif
@@ -26,21 +32,12 @@ res(NA.2010)
 #plot(NA.2020)
 ```
 
-## Land Cover Change
-```{r}
-lc.cropland <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m.tif")
-lc.wetland <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_wetland_gain_loss_2015v4_2020v2_30m.tif")
-lc.barren <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_barrenland_gain_loss_2015v4_2020v2_30m.tif")
-lc.water <- rast("spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_water_gain_loss_2015v4_2020v2_30m.tif")
-```
 
-## Temp Change
+## Climate
 ```{r}
 install.packages("ncdf4")
 library(ncdf4)
 
-# 1) point these to the TerraClimate NetCDF file containing monthly tmean (example filename)
-#    Replace with the actual path or URL you downloaded.
 ncfile <- "spatial_predictors/TerraClimate_tmax_2012.nc"
 r <- rast(ncfile)
 r2012 <- r$tmax_6
@@ -60,6 +57,42 @@ delta_na <- crop(delta, na_bbox)
 writeRaster(delta_na, "tmean_2022_minus_2012_NA.tif", overwrite=TRUE)
 
 plot(delta_na, main="Mean annual T (2022) − Mean annual T (2012) (°C)")
+```
+
+```{r}
+file_paths <- file_paths <- list.files(
+  path = "spatial_predictors/TerraClimate",
+  pattern = "\\.nc$",       # look for files ending in .tif
+  full.names = TRUE
+)
+
+layer_names <- basename(file_paths) |>
+  sub("^TerraClimate_", "", x = _) |>                      # remove prefix
+  sub("\\.nc$", "", x = _)
+
+layer_names.ny <- basename(file_paths) |>
+  sub("^TerraClimate_", "", x = _) |>                      # remove prefix
+  sub("_[0-9]{4}\\.nc$", "", x = _) %>% unique()
+
+climate <- lapply(file_paths, rast)
+names(climate) <- layer_names
+
+for (i in 1:5){
+  layer2 <- i+1
+  r2012 <- climate[[i]]
+  r2022 <- climate[[layer2]]
+  
+  ann2012 <- app(r2012, mean, na.rm=TRUE)
+  ann2022 <- app(r2022, mean, na.rm=TRUE)
+  
+  delta <- ann2022 - ann2012
+
+  na_bbox <- ext(-170, -50, 5, 85)
+  delta_na <- crop(delta, na_bbox)
+
+  writeRaster(delta_na, paste0("spatial_predictors/delta_climate/",layer_names.ny[[i]],"_delta.tif"), overwrite=TRUE)
+}
+
 ```
 
 # BANS decline
@@ -131,8 +164,11 @@ image.plot(zlim = c(0, 1), breaks = label_breaks, col = legend_colors,
 trends_raster <- rasterize_trends(trends_bans, layers = "abd_trend")
 library(raster)
 trends_raster.proj <- project(trends_raster, "EPSG:4326")
+writeRaster(trends_raster.proj, "spatial_predictors/eBird_trends_BANS_proj4326.tif")
 plot(trends_raster.proj)
 
+
+trends_raster.proj <- rast("spatial_predictors/eBird_trends_BANS_proj4326.tif")
 trends.df <- as.data.frame(trends_raster.proj, xy=T)
 ```
 
@@ -142,54 +178,543 @@ genoscape <- rast("spatial_predictors/BANS_genoscape_brick.tif")
 na_bbox <- ext(-170, -50, 5, 85)
 genoscape.crop <- crop(genoscape, na_bbox)
 plot(genoscape.crop)
-
-delta_na <- rast("spatial_predictors/tmean_2022_minus_2012_NA.tif")
-```
-
-## getting temp data per AU cell...
-```{r}
-crs(delta_na) == crs(genoscape.crop)
-delta_na.proj <- terra::project(delta_na, genoscape.crop)
-crs(delta_na.proj) == crs(genoscape.crop)
-plot(delta_na.proj)
+genoscape_pol <- terra::as.polygons(genoscape.crop)
 ```
 
 ```{r}
-# resample to trend data as this is the biggest resolution
+q_by_trend <- terra::extract(
+  genoscape.crop,
+  trends_polys,
+  fun = mean,
+  na.rm = TRUE
+)
+head(q_by_trend)
+q_by_trend[is.nan(as.matrix(q_by_trend))] <- NA
+
+q_cols <- names(q_by_trend)[names(q_by_trend) != "ID"]
+
+au_by_trend <- q_by_trend %>%
+  mutate(
+    AU_index = max.col(select(., all_of(q_cols)), ties.method = "first"),
+    AU = paste0("Group_", AU_index)  # or whatever labels you use (West/Central/East, etc.)
+  )
+```
+
+## Land Cover Change
+```{r}
+file_paths <- file_paths <- list.files(
+  path = "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data",
+  pattern = "30m\\.tif$",       # look for files ending in .tif
+  full.names = TRUE
+)
+
+layer_names <- basename(file_paths) |>
+  sub("^NA_NALCMS_", "", x = _) |>                      # remove prefix
+  sub("_2015v4_2020v2_30m\\.tif$", "", x = _)
+
+landchange <- lapply(file_paths, rast)
+```
+
+```{r}
+names(landchange) <- layer_names
+
+# trends_raster.proj2 <- project(trends_raster.proj, crs(landchange$barrenland_gain_loss))
+# crs(trends_raster.proj)==crs(landchange$barrenland_gain_loss)
+
+trends_polys <- terra::as.polygons(trends_raster.proj, dissolve=F)
+vals <- values(trends_polys)
+
+for(i in 1:10){
+  lc <- landchange[[i]]
+  landchange.ag[[i]] <- aggregate(lc, fact=30, fun=modal)
+  writeRaster(landchange.ag[[i]], paste0("spatial_predictors/land_change_ag/",i,"_raster_900m.tif"))
+}
+```
+
+```{r}
+file_paths <- file_paths <- list.files(
+  path = "spatial_predictors/land_change_ag/",
+  pattern = "\\.tif$",       # look for files ending in .tif
+  full.names = TRUE
+)
+
+land_change_ag <- lapply(file_paths, rast)
+plot(land_change_ag[[1]])
+
+landchange.proj <- list()
+for(i in 1:10){
+  lc <- land_change_ag[[i]]
+  landchange.proj[[i]] <- project(lc, "EPSG:4326")
+  writeRaster(landchange.proj[[i]], paste0("spatial_predictors/land_change_ag/",i,"_raster_900m_4326.tif"))
+}
+```
+
+```{r}
+for (i in 1:10) {
+  cat("Summarizing layer:", i)
+  file_path <- paste0("spatial_predictors/land_change_ag/",i,"_raster_900m_4326.tif")
+  lc_layer <- rast(file_path)
+  landchange_summary <- terra::extract(lc_layer, trends_polys, fun = function(x) {
+    prop_gain <- sum(x == 1, na.rm = TRUE) / length(x)
+    prop_loss <- sum(x == 2, na.rm = TRUE) / length(x)
+    c(gain = prop_gain, loss = prop_loss)
+  })
+  fwrite(landchange_summary, paste0("spatial_predictors/land_change_ag/",i,"_raster_summary_4326.csv"))
+}
+
+landchange_summary <- list()
+for(i in 1:10) {
+  landchange_summary[[i]] <- read.csv(paste0("spatial_predictors/land_change_ag/",i,"_raster_summary_4326.csv"))
+  colnames(landchange_summary[[i]]) <- c("ID", paste0(layer_names[[i]],"_gain"), paste0(layer_names[[i]],"_loss"))
+}
+
+all_summary <- landchange_summary[[1]]
+for( i in 2:10){
+  lc_df <- landchange_summary[[i]]
+  all_summary <- left_join(all_summary, lc_df, by="ID")
+}
+
+data.table::fwrite(all_summary, "spatial_predictors/landchange_all_layers_summary_4326.csv")
+
+```
+
+# Splitting data up per AU
+```{r}
+genoscape <- rast("spatial_predictors/BANS_genoscape_brick.tif")
+na_bbox <- ext(-170, -50, 5, 85)
+genoscape.crop <- crop(genoscape, na_bbox)
+plot(genoscape.crop)
+genoscape_pol <- terra::as.polygons(genoscape.crop)
+```
+
+## getting clim data per AU cell...
+```{r}
+delta_temp <- rast("spatial_predictors/tmean_2022_minus_2012_NA.tif")
+# crs(delta_na) == crs(genoscape.crop)
+# delta_na.proj <- terra::project(delta_na, genoscape.crop)
+# crs(delta_na.proj) == crs(genoscape.crop)
+# plot(delta_na.proj)
 delta_resamp <- resample(delta_na.proj, trends_raster.proj, method = "bilinear")
 plot(delta_resamp)
 
 genoscape_pol <- terra::as.polygons(genoscape.crop)
-# extract temp data for each cell in the genoscape, grouped by Q val
-temp_AU <- terra::extract(delta_resamp, genoscape_pol, cells = TRUE)
-```
-## land cover per AU
-```{r}
-#cropland
-lc.cropland_proj <- terra::project(lc.cropland, genoscape.crop)
-writeRaster(lc.cropland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m_projected.tif")
 
-#wetland
-lc.wetland_proj <- terra::project(lc.wetland, genoscape.crop)
-writeRaster(lc.wetland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_wetland_gain_loss_2015v4_2020v2_30m_projected.tif")
-
-#barren
-lc.barren_proj <- terra::project(lc.barren, genoscape.crop)
-writeRaster(lc.wetland_proj, "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data/NA_NALCMS_barrenland_gain_loss_2015v4_2020v2_30m_projected.tif")
-
-lc_resamp <- resample(lc.cropland_proj, trends_raster.proj, method = "bilinear")
-plot(lc_resamp)
-
-lc_AU <- terra::extract(lc_resamp, genoscape_pol, cells = TRUE)
+temp_AU <- terra::extract(delta_resamp, genoscape_pol, cells = TRUE) %>% rename(deltatemp=mean)
 ```
 
-## Getting trend data per AU
 ```{r}
-trend_AU <- terra::extract(trends_raster.proj, genoscape_pol, cells=TRUE)
+file_paths <- file_paths <- list.files(
+  path = "spatial_predictors/delta_climate",
+  pattern = "\\.tif$",       # look for files ending in .tif
+  full.names = TRUE
+)
+
+delta_clim <- lapply(file_paths, rast)
+
+layer_names <- basename(file_paths) |>
+  sub("\\.tif$", "", x = _)
+
+genoscape_pol <- terra::as.polygons(genoscape.crop)
+
+for (i in 1:5){
+  delta <- delta_clim[[i]]
+  delta_trend <- terra::extract(delta, trends_polys, fun=mean)
+  colnames(delta_trend) <- c("ID", paste0(layer_names[i]))
+  write.csv(delta_trend, paste0("spatial_predictors/delta_climate/",layer_names[i],".csv"))
+}
+
+delta_files <- list.files(
+  path = "spatial_predictors/delta_climate",
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+# read them in
+delta_list <- lapply(delta_files, read.csv)
+
+# if write.csv added a junk first column (like "x"), drop it:
+delta_list <- lapply(delta_list, \(df) df %>% select(-matches("^X$")))
+
+# merge them all by ID
+delta_all <- reduce(delta_list, left_join, by = "ID")
+```
+
+```{r}
+all_summary <- read.csv("spatial_predictors/landchange_all_layers_summary_4326.csv")
+landchange_with_AU <- all_summary %>%
+  left_join(au_by_trend[, c("ID", "AU")], by = "ID")
+
+delta_with_AU <- delta_all %>% left_join(au_by_trend[, c("ID", "AU")], by = "ID")
+
+nrow(landchange_with_AU)==nrow(delta_T_with_AU)
+
+trends.values <- terra::extract(trends_raster.proj, trends_polys, fun=mean)
 ```
 
 # Writing Final Data
 ```{r}
-data <- left_join(trend_AU, temp_AU, by="cell") %>% left_join(lc_AU) %>% rename(group=ID.x, lc_cropland=NA_NALCMS_cropland_gain_loss_2015v4_2020v2_30m) %>% dplyr::select(group, abd_trend, mean, cell, lc_cropland) %>% write.csv("prelim_data.csv")
+sp.data <- left_join(trends.values, landchange_with_AU, by="ID") %>% left_join(delta_with_AU, by=c("ID", "AU"))
+
+sp.data.clean <- sp.data %>% tidyr::drop_na()
+
+sp.data.clean %>% write.csv("spatial_predictor_data.csv", row.names = F)
+
+trends.cen <- terra::centroids(trends_polys)
+trends.xy <- crds(trends.cen)
+
+sp.data.xy <- cbind(sp.data, trends.xy)
+
+sp.data.clean.xy <- sp.data.xy %>% tidyr::drop_na()
+
+sp.data.clean.xy %>% write.csv("spatial_predictor_data_xy.csv", row.names = F)
 ```
 
+# CLEAN STUFF
+# Libraries
+```{r}
+library(ncdf4)
+library(terra)
+library(raster)
+library(dplyr)
+library(purrr)
+library(data.table)
+library(ebirdst)
+library(fields)
+library(rnaturalearth)
+library(sf)
+```
+
+# Climate Change
+## example delta between 2012 and 2022
+```{r}
+ncfile <- "spatial_predictors/TerraClimate/TerraClimate_tmax_2012.nc"
+r <- rast(ncfile)
+r2012 <- r[[6]]
+
+ncfile <- "spatial_predictors/TerraClimate/TerraClimate_tmax_2022.nc"
+r <- rast(ncfile)
+r2022 <- r[[6]]
+
+delta <- r2022 - r2012
+
+na_bbox <- ext(-170, -50, 5, 85)
+delta_na <- crop(delta, na_bbox)
+
+writeRaster(delta_na, "tmean_2022_minus_2012_NA.tif", overwrite = TRUE)
+
+plot(delta_na, main = "Mean annual T (2022) − Mean annual T (2012) (°C)")
+```
+
+## Loop for all variables
+```{r}
+file_paths12 <- list.files(
+  path = "spatial_predictors/TerraClimate",
+  pattern = "2012\\.nc$",
+  full.names = TRUE
+)
+file_paths22 <- list.files(
+  path = "spatial_predictors/TerraClimate",
+  pattern = "2022\\.nc$",
+  full.names = TRUE
+)
+
+layer_names.ny <- basename(file_paths12) |>
+  sub("^TerraClimate_", "", x = _) |>
+  sub("_2012\\.nc$", "", x = _) |>
+  unique()
+
+climate12 <- lapply(file_paths12, rast)
+climate22 <- lapply(file_paths22, rast)
+names(climate) <- layer_names
+
+for (i in 1:5) {
+  r2012_june <- climate12[[i]][[6]]
+  r2022_june <- climate22[[i]][[6]]
+  
+  delta <- r2022_june - r2012_june
+  
+  na_bbox <- ext(-170, -50, 5, 85)
+  delta_na <- crop(delta, na_bbox)
+  
+  writeRaster(
+    delta_na,
+    paste0("spatial_predictors/delta_climate/", layer_names.ny[[i]], "_june_delta.tif"),
+    overwrite = TRUE
+  )
+}
+
+test <- rast("spatial_predictors/delta_climate/ws_june_delta.tif")
+test
+```
+
+# eBIRD Trends
+```{r}
+## BANS decline: eBird trends
+
+set_ebirdst_access_key("srtemkuj2h9h", overwrite = TRUE)
+ebirdst_download_trends(species = "banswa")
+
+trends_bans <- load_trends("banswa")
+
+trends_sf <- st_as_sf(
+  trends_bans,
+  coords = c("longitude", "latitude"),
+  crs = 4326
+)
+
+plot(trends_sf)
+
+trends_circles <- vectorize_trends(
+  trends_bans,
+  crs = "+proj=eqearth +lon_0=-96"
+)
+
+max_trend <- ceiling(max(abs(trends_circles$abd_trend)))
+legend_breaks <- seq(0, 40, by = 10)
+legend_breaks[length(legend_breaks)] <- max_trend
+legend_breaks <- c(-rev(legend_breaks), legend_breaks) |> unique()
+legend_labels <- c("<=-40", -20, 0, 20, ">=40")
+legend_colors <- ebirdst_palettes(length(legend_breaks) - 1, type = "trends")
+
+# assign colors to circles
+trends_circles <- trends_circles |> 
+  mutate(
+    color = cut(abd_trend, legend_breaks, labels = legend_colors) |>
+      as.character()
+  )
+
+countries <- ne_countries(returnclass = "sf", continent = "North America") |> 
+  st_geometry() |> 
+  st_transform(st_crs(trends_circles))
+
+states <- ne_states(iso_a2 = c("US", "CA", "MX")) |> 
+  st_geometry() |> 
+  st_transform(st_crs(trends_circles))
+
+# plot
+plot(st_geometry(trends_circles), border = NA, col = NA)
+plot(countries, col = "#cfcfcf", border = "#888888", add = TRUE)
+plot(st_geometry(trends_circles),
+     col = trends_circles$color, border = NA,
+     axes = FALSE, bty = "n", reset = FALSE, add = TRUE)
+lines(vect(countries), col = "#ffffff", lwd = 3)
+lines(vect(states), col = "#ffffff", lwd = 1.5, xpd = TRUE)
+
+label_breaks <- seq(0, 1, length.out = length(legend_breaks))
+image.plot(zlim = c(0, 1), breaks = label_breaks, col = legend_colors,
+           smallplot = c(0.90, 0.93, 0.15, 0.85),
+           legend.only = TRUE,
+           axis.args = list(at = c(0, 0.25, 0.5, 0.75, 1), 
+                            labels = legend_labels,
+                            col.axis = "black", fg = NA,
+                            cex.axis = 0.7, lwd.ticks = 0,
+                            line = -0.75),
+           legend.args = list(text = "Abundance Trend [% change]",
+                              side = 2, line = 0.25))
+
+trends_raster <- rasterize_trends(trends_bans, layers = "abd_trend")
+trends_raster.proj <- project(trends_raster, "EPSG:4326")
+writeRaster(trends_raster.proj, "spatial_predictors/eBird_trends_BANS_proj4326.tif")
+plot(trends_raster.proj)
+
+trends_raster.proj <- rast("spatial_predictors/eBird_trends_BANS_proj4326.tif")
+trends.df <- as.data.frame(trends_raster.proj, xy = TRUE)
+```
+
+# Genoscape/AU assignment
+```{r}
+## Splitting data up per AU
+
+genoscape <- rast("spatial_predictors/BANS_genoscape_brick.tif")
+na_bbox <- ext(-170, -50, 5, 85)
+genoscape.crop <- crop(genoscape, na_bbox)
+plot(genoscape.crop)
+genoscape_pol <- terra::as.polygons(genoscape.crop)
+
+q_by_trend <- terra::extract(
+  genoscape.crop,
+  trends_polys,
+  fun = mean,
+  na.rm = TRUE
+)
+q_by_trend[is.nan(as.matrix(q_by_trend))] <- NA
+
+q_cols <- names(q_by_trend)[names(q_by_trend) != "ID"]
+
+au_by_trend <- q_by_trend %>%
+  mutate(
+    AU_index = max.col(select(., all_of(q_cols)), ties.method = "first"),
+    AU = paste0("Group_", AU_index)
+  )
+```
+
+# Land cover change (aggregation and extraction)
+## aggregation
+```{r}
+## Land Cover Change
+file_paths <- list.files(
+  path = "spatial_predictors/land_change_2015v4_2020v2_30m_tif/LChange_2015v4_2020v2_30m/data",
+  pattern = "30m\\.tif$",
+  full.names = TRUE
+)
+
+layer_names <- basename(file_paths) |>
+  sub("^NA_NALCMS_", "", x = _) |>
+  sub("_2015v4_2020v2_30m\\.tif$", "", x = _)
+
+landchange <- lapply(file_paths, rast)
+names(landchange) <- layer_names
+
+trends_polys <- terra::as.polygons(trends_raster.proj, dissolve = FALSE)
+vals <- values(trends_polys)
+
+landchange.ag <- list()
+for (i in 1:10) {
+  lc <- landchange[[i]]
+  landchange.ag[[i]] <- aggregate(lc, fact = 30, fun = modal)
+  writeRaster(
+    landchange.ag[[i]],
+    paste0("spatial_predictors/land_change_ag/", i, "_raster_900m.tif"),
+    overwrite = TRUE
+  )
+}
+```
+## reproject
+```{r}
+file_paths <- file_paths <- list.files(
+  path = "spatial_predictors/land_change_ag/",
+  pattern = "\\.tif$",       # look for files ending in .tif
+  full.names = TRUE
+)
+
+land_change_ag <- lapply(file_paths, rast)
+plot(land_change_ag[[1]])
+
+landchange.proj <- list()
+for(i in 1:10){
+  lc <- land_change_ag[[i]]
+  landchange.proj[[i]] <- project(lc, "EPSG:4326")
+  writeRaster(landchange.proj[[i]], paste0("spatial_predictors/land_change_ag/",i,"_raster_900m_4326.tif"))
+}
+```
+
+## extraction
+```{r}
+landchange_summary <- list()
+
+for (i in 1:10) {
+  cat("Summarizing layer:", i, "\n")
+  file_path <- paste0("spatial_predictors/land_change_ag/", i, "_raster_900m_4326.tif")
+  lc_layer <- rast(file_path)
+  landchange_summary[[i]] <- terra::extract(
+    lc_layer, trends_polys,
+    fun = function(x) {
+      prop_gain <- sum(x == 1, na.rm = TRUE) / length(x)
+      prop_loss <- sum(x == 2, na.rm = TRUE) / length(x)
+      c(gain = prop_gain, loss = prop_loss)
+    }
+  )
+  fwrite(
+    landchange_summary[[i]],
+    paste0("spatial_predictors/land_change_ag/", i, "_raster_summary_4326.csv")
+  )
+}
+
+for (i in 1:10) {
+  landchange_summary[[i]] <- read.csv(
+    paste0("spatial_predictors/land_change_ag/", i, "_raster_summary_4326.csv")
+  )
+  colnames(landchange_summary[[i]]) <- c(
+    "ID",
+    paste0(layer_names[[i]], "_gain"),
+    paste0(layer_names[[i]], "_loss")
+  )
+}
+
+all_summary <- landchange_summary[[1]]
+for (i in 2:10) {
+  lc_df <- landchange_summary[[i]]
+  all_summary <- left_join(all_summary, lc_df, by = "ID")
+}
+
+data.table::fwrite(all_summary, "spatial_predictors/landchange_all_layers_summary_4326.csv")
+```
+
+# Climate Trend per Trend Cell
+```{r}
+## Delta climate per trend cell
+
+file_paths <- list.files(
+  path = "spatial_predictors/delta_climate",
+  pattern = "\\.tif$",
+  full.names = TRUE
+)
+
+delta_clim <- lapply(file_paths, rast)
+
+layer_names <- basename(file_paths) |>
+  sub("\\.tif$", "", x = _)
+
+genoscape_pol <- terra::as.polygons(genoscape.crop)
+
+for (i in 1:5) {
+  delta <- delta_clim[[i]]
+  delta_trend <- terra::extract(delta, trends_polys, fun = mean)
+  colnames(delta_trend) <- c("ID", layer_names[i])
+  write.csv(
+    delta_trend,
+    paste0("spatial_predictors/delta_climate/", layer_names[i], ".csv"),
+    row.names = FALSE
+  )
+}
+
+delta_files <- list.files(
+  path = "spatial_predictors/delta_climate",
+  pattern = "_june_delta\\.csv$",
+  full.names = TRUE
+)
+
+delta_list <- lapply(delta_files, read.csv)
+
+delta_list <- lapply(delta_list, \(df) df %>% select(-matches("^X$")))
+
+delta_all <- reduce(delta_list, left_join, by = "ID")
+```
+
+# Final data join
+```{r}
+## Join everything together
+
+all_summary <- read.csv("spatial_predictors/landchange_all_layers_summary_4326.csv")
+
+landchange_with_AU <- all_summary %>%
+  left_join(au_by_trend[, c("ID", "AU")], by = "ID")
+
+delta_with_AU <- delta_all %>%
+  left_join(au_by_trend[, c("ID", "AU")], by = "ID")
+
+# FIXED: use delta_with_AU (you had delta_T_with_AU, which doesn't exist)
+nrow(landchange_with_AU) == nrow(delta_with_AU)
+
+trends.values <- terra::extract(trends_raster.proj, trends_polys, fun = mean)
+# usually this is c("ID", "abd_trend"), but you can check:
+# colnames(trends.values)
+
+sp.data <- left_join(trends.values, landchange_with_AU, by = "ID") %>%
+  left_join(delta_with_AU, by = c("ID", "AU"))
+
+sp.data.clean <- sp.data %>% tidyr::drop_na()
+
+sp.data.clean %>%
+  write.csv("spatial_predictor_data.csv", row.names = FALSE)
+
+trends.cen <- terra::centroids(trends_polys)
+trends.xy <- crds(trends.cen)
+
+sp.data.xy <- cbind(sp.data, trends.xy)
+
+sp.data.clean.xy <- sp.data.xy %>% tidyr::drop_na()
+
+sp.data.clean.xy %>%
+  write.csv("spatial_predictor_data_xy.csv", row.names = FALSE)
+```

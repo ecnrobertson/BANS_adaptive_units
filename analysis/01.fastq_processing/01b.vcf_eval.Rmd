@@ -1,0 +1,657 @@
+---
+title: "01b.vcf_eval"
+author: "Erica Robertson"
+date: "2025-11-14"
+output: html_document
+---
+```{r}
+knitr::opts_knit$set(root.dir="~/Desktop/BANS_adaptive_units/")
+```
+#libraries
+```{r}
+library(tidyverse)
+library(data.table)
+```
+# stats
+## missingness
+Let's just get some basic stats...
+```{bash}
+vcftools --gzvcf ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz --missing-indv
+```
+<!-- After filtering, kept 229 out of 229 Individuals -->
+<!-- Outputting Individual Missingness -->
+<!-- After filtering, kept 3085135 out of a possible 3085135 Sites -->
+
+```{bash}
+bcftools stats ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.stats.txt
+```
+<!-- SN    [2]id     [3]key                [4]value -->
+<!-- SN      0       number of samples:      229 -->
+<!-- SN      0       number of records:      3085135 -->
+<!-- SN      0       number of no-ALTs:      0 -->
+<!-- SN      0       number of SNPs: 3085135 -->
+<!-- SN      0       number of MNPs: 0 -->
+<!-- SN      0       number of indels:       0 -->
+<!-- SN      0       number of others:       0 -->
+<!-- SN      0       number of multiallelic sites:   0 -->
+<!-- SN      0       number of multiallelic SNP sites:       0 -->
+
+So, this all looks okay.
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf_final/eval/out.imiss /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/
+```
+
+```{r}
+miss <- read_table("out.imiss") %>% rename(sample=INDV)
+plates <- read_table("snakemake/config_files/BANS.Plate1.2.3.units.tsv")
+meta.all <- left_join(plates, miss, by="sample")
+ggplot(meta.all, aes(x = sample, y = F_MISS, color = library)) +
+  geom_point(size = 3) +
+  xlab("Individual") +
+  ylab("Proportion Missing (F_MISS)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave("BANS_all_ind_missingness.png")
+
+ggplot(meta.all, aes(x = library, y = F_MISS, color = library)) +
+  geom_boxplot(size = 3) +
+  xlab("Individual") +
+  ylab("Proportion Missing (F_MISS)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r}
+meta.best <- meta.all %>% filter(F_MISS<=.3)
+nrow(meta.best)
+```
+
+Well, the plate that I extracted has much lower missingness, and much less variable missingess. 209 individuals with low missingness is pretty good though.
+
+So now I'm worried about batch effects. Quick PCA to evaluate...
+
+# PCA for plate effects
+##All Individuals
+#### pruning
+```{bash}
+#GIVING SNP IDS
+vcf="../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz"
+
+conda activate GWAS2
+plink --vcf $vcf --aec --recode --out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode
+
+cat BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.map | awk -F"\t" '{split($1, a, "__"); print $1"\t"a[1]"."$4"\t"$3"\t"$4}' > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_loc.map
+
+plink --ped BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.ped \
+--map BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_loc.map \
+--make-bed --aec \
+--out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode
+
+bfile="BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode"
+
+plink --bfile $bfile --aec \
+--indep-pairwise 25 10 0.5 --out PC1_allindv_noimpute
+#Pruning complete.  227199 of 3085135 variants removed.
+
+plink --bfile $bfile --aec --extract PC1_allindv_noimpute.prune.in \
+  --make-bed --out pruned_allindv
+#2857936 variants and 229 people pass filters and QC.
+
+plink --bfile pruned_allindv --aec --allow-no-sex --pca 228 \
+  --out PC1_allindv_noimpute.ld25-10-0.5
+#Total genotyping rate is 0.848447.
+#2857936 variants and 229 people pass filters and QC.
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf_final/eval/PC1_allindv_noimpute.ld25-10-0.5*eigen* /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/
+```
+#### Time to plot the PCA.
+####grouping pops
+The actual group pops is missing indv that I filtered for missingness, so this is a quick temporary one...
+```{r}
+library(rnaturalearth)
+library(geosphere)
+
+meta <- read.csv("../../data/BANS_all_sample_data.csv")
+coords <- meta %>% dplyr::select(Long, Lat)
+dist_matrix <- distm(as.matrix(coords), fun = distHaversine)
+
+libraries <- read.delim("snakemake/config_files/BANS.Plate1.2.3.units.tsv") %>% rename(BGP_ID=sample)
+
+lib.meta <- left_join(meta, libraries %>% dplyr::select(library, BGP_ID), by="BGP_ID")
+
+# clustering
+hclust_groups <- hclust(as.dist(dist_matrix), method = "complete") # complete method here avoids chaining, ensuring all samples in a cluster are within the specified distance of each other. If you want some flexibility you could try "average"
+
+# cut tree at 111.111 km to assign spatial clusters
+meta$GroupID <- cutree(hclust_groups, h = 111111)
+
+# create population labels and filter for minimum cluster size
+meta.sub <- meta %>%
+  mutate(Pop = paste0("Cluster_", GroupID)) %>%
+  group_by(Pop) %>%
+  filter(n() > 3) %>%  # keep clusters with ≥4 individuals
+  ungroup()
+
+pops <- data.frame(BGP_ID = meta.sub$BGP_ID, Group = meta.sub$Pop)
+
+library(rnaturalearth)
+library(raster)
+library(terra)
+map <- ne_states(country = c("United States of America", "Canada", "Mexico"), 
+                 returnclass = 'sf')
+
+# create colors for clusters
+n_clusters <- length(unique(meta.sub$Pop))
+cluster_colors <- rainbow(n_clusters)
+names(cluster_colors) <- unique(meta.sub$Pop)
+
+meta.b <- meta.sub %>%
+  group_by(Pop) %>%
+  mutate(cluster_size = n()) %>%
+  ungroup()
+
+# plot it
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_point(data = meta.b, aes(x = Long, y = Lat, color = Pop),
+             size = 1.5, position = position_jitter(width = 0.1, height = 0.1)) +
+  geom_text(data = meta.b,
+            aes(x = Long, y = Lat, label = Pop),
+            size = 2, vjust = -0.6) +
+  scale_colour_manual(values = cluster_colors, name = "Spatial Clusters", guide = "none") +
+  coord_sf(xlim = c(-145, -55), ylim = c(15, 80)) + 
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+p
+ggsave("cluster_plot.png")
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+plink_pca <- read.table("PC1_allindv_noimpute.ld25-10-0.5.eigenvec", header = FALSE) %>% dplyr::select(-V2)
+eigenval <- scan("PC1_allindv_noimpute.ld25-10-0.5.eigenval")
+
+pve05 <- data.frame(PC = 1:228, pve = eigenval/sum(eigenval)*100)
+
+# set names
+pca05 <- plink_pca
+colnames(pca05)[-1] <- paste0("PC", 1:(ncol(pca05) - 1))
+names(pca05)[1] <- "ind"
+nrow(pca05)
+#correct number of samples
+
+pops
+
+# Join PCA data
+pca.cluster <- left_join(pca05, pops %>% rename(ind=BGP_ID), by="ind")  # left_join PCA first to preserve PC columns
+
+# Factor for cluster order
+region_order <- c(
+  "Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20",
+  "Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19",
+  "Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7"
+)
+pca.cluster$Cluster <- factor(pca.cluster$Group, levels = region_order)
+
+# Define clusters by region
+West_clusters    <- c("Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20")
+Central_clusters <- c("Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19")
+East_clusters    <- c("Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7")
+
+# Assign colors by cluster
+library(RColorBrewer)
+W.cols <- setNames(brewer.pal(n = length(West_clusters), "Reds"), West_clusters)
+C.cols <- setNames(brewer.pal(n = length(Central_clusters), "Blues"), Central_clusters)
+E.cols <- setNames(brewer.pal(n = length(East_clusters), "Greens"), East_clusters)
+bg <- c(W.cols, C.cols, E.cols)
+
+# Plot
+b05 <- ggplot(pca.cluster, aes(PC1, PC2, col = Cluster)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+b05
+ggsave("BANS_all_overall_PCA.png", width=8)
+```
+
+```{r}
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_point(data = meta.b, aes(x = Long, y = Lat, color = Pop),
+             size = 1.5, position = position_jitter(width = 0.1, height = 0.1)) +
+  geom_text(data = meta.b,
+            aes(x = Long, y = Lat, label = Pop),
+            size = 2, vjust = -0.6) +
+  scale_colour_manual(values = bg, name = "Spatial Clusters", guide = "none") +
+  coord_sf(xlim = c(-145, -55), ylim = c(15, 80)) + 
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+p
+ggsave("cluster_bestindv_plot.png")
+```
+
+## Best Individuals
+### pruning
+```{bash}
+#GIVING SNP IDS
+vcf="../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz"
+
+conda activate GWAS2
+plink --vcf $vcf --aec --recode --remove high_miss_samples_2col.txt --out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_bestind
+#--remove: 209 people remaining.
+#Total genotyping rate in remaining samples is 0.874195.
+#3085135 variants and 209 people pass filters and QC.
+
+cat BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_bestind.map | awk -F"\t" '{split($1, a, "__"); print $1"\t"a[1]"."$4"\t"$3"\t"$4}' > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_bestind_loc.map
+
+plink --ped BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_bestind.ped \
+--map BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_bestind_loc.map \
+--make-bed --aec \
+--out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_bestind
+
+bfile="BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode_bestind"
+
+plink --bfile $bfile --aec \
+--indep-pairwise 25 10 0.5 --out PC1_bestindv_noimpute
+#Pruning complete.  229466 of 3085135 variants removed.
+
+plink --bfile $bfile --aec --extract PC1_bestindv_noimpute.prune.in \
+  --make-bed --out pruned_bestindv
+#2855669 variants and 209 people pass filters and QC.
+
+plink --bfile pruned_bestindv --aec --allow-no-sex --pca 208 \
+  --out PC1_bestindv_noimpute.ld25-10-0.5
+#Total genotyping rate is 0.873129.
+#2855669 variants and 209 people pass filters and QC.
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf_final/eval/PC1_bestindv_noimpute.ld25-10-0.5*eigen* /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/
+```
+### Time to plot the PCA.
+####grouping pops
+The actual group pops is missing indv that I filtered for missingness, so this is a quick temporary one...
+```{r}
+library(rnaturalearth)
+library(geosphere)
+
+meta <- read.csv("../../data/BANS_all_sample_data.csv")
+best.ind <- read.delim("../../data/BANS_best_sample_list.txt")
+meta <- meta %>% filter(BGP_ID %in% best.ind$BGP_ID)
+
+coords <- meta %>% dplyr::select(Long, Lat)
+dist_matrix <- distm(as.matrix(coords), fun = distHaversine)
+
+# clustering
+hclust_groups <- hclust(as.dist(dist_matrix), method = "complete") # complete method here avoids chaining, ensuring all samples in a cluster are within the specified distance of each other. If you want some flexibility you could try "average"
+
+# cut tree at 111.111 km to assign spatial clusters
+meta$GroupID <- cutree(hclust_groups, h = 111111)
+
+# create population labels and filter for minimum cluster size
+meta.sub <- meta %>%
+  mutate(Pop = paste0("Cluster_", GroupID)) %>%
+  group_by(Pop) %>%
+  filter(n() > 3) %>%  # keep clusters with ≥4 individuals
+  ungroup()
+
+pops <- data.frame(BGP_ID = meta.sub$BGP_ID, Group = meta.sub$Pop)
+
+library(rnaturalearth)
+library(raster)
+library(terra)
+map <- ne_states(country = c("United States of America", "Canada", "Mexico"), 
+                 returnclass = 'sf')
+
+# create colors for clusters
+n_clusters <- length(unique(meta.sub$Pop))
+cluster_colors <- rainbow(n_clusters)
+names(cluster_colors) <- unique(meta.sub$Pop)
+
+meta.b <- meta.sub %>%
+  group_by(Pop) %>%
+  mutate(cluster_size = n()) %>%
+  ungroup()
+
+# plot it
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_point(data = meta.b, aes(x = Long, y = Lat, color = Pop),
+             size = 1.5, position = position_jitter(width = 0.1, height = 0.1)) +
+  geom_text(data = meta.b,
+            aes(x = Long, y = Lat, label = Pop),
+            size = 2, vjust = -0.6) +
+  scale_colour_manual(values = cluster_colors, name = "Spatial Clusters", guide = "none") +
+  coord_sf(xlim = c(-145, -55), ylim = c(15, 80)) + 
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+p
+ggsave("cluster_plot.png")
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+plink_pca <- read.table("PC1_bestindv_noimpute.ld25-10-0.5.eigenvec", header = FALSE) %>% dplyr::select(-V2)
+eigenval <- scan("PC1_bestindv_noimpute.ld25-10-0.5.eigenval")
+
+pve05 <- data.frame(PC = 1:208, pve = eigenval/sum(eigenval)*100)
+
+# set names
+pca05 <- plink_pca
+colnames(pca05)[-1] <- paste0("PC", 1:(ncol(pca05) - 1))
+names(pca05)[1] <- "ind"
+nrow(pca05)
+#correct number of samples
+
+pops <- pops %>% rename(ind=BGP_ID)
+
+# Join PCA data
+pca.cluster <- left_join(pops, pca05, by="ind")  # left_join PCA first to preserve PC columns
+
+pca.cluster$Group <- factor(pca.cluster$Group, levels = region_order)
+
+# Plot
+b05 <- ggplot(pca.cluster, aes(PC1, PC2, col = Group)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+b05
+
+ggsave("BANS_bestindv_overall_noimputed_PCA.png", width=8)
+```
+
+## double checking PC values...
+```{r}
+# Read eigenvecs
+all  <- read.table("PC1_allindv_noimpute.ld25-10-0.5.eigenvec", header = FALSE)
+best <- read.table("PC1_bestindv_noimpute.ld25-10-0.5.eigenvec", header = FALSE)
+
+# FID IID PC1 PC2 ...
+colnames(all)  <- c("FID", "IID", paste0("PC", 1:(ncol(all) - 2)))
+colnames(best) <- c("FID", "IID", paste0("PC", 1:(ncol(best) - 2)))
+
+# Join on IID (or your BGP_ID if that's IID)
+merged <- inner_join(all, best, by = "IID", suffix = c("_all", "_best"))
+
+# Correlation between the first PC from both runs:
+cor(merged$PC1_all, merged$PC1_best)
+
+# Maximum absolute difference:
+max(abs(merged$PC1_all - merged$PC1_best))
+```
+### no related indv
+```{r}
+library(plotly)
+
+rel <- ggplot(pca.cluster, aes(
+    x = PC1, 
+    y = PC2, 
+    col = Group,
+    text = paste0(
+        "ID: ", ind, "<br>",
+        "Group: ", Group, "<br>",
+        "PC1: ", round(PC1, 4), "<br>",
+        "PC2: ", round(PC2, 4)
+    )
+)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+rel
+ggplotly(rel)
+```
+Removing 7 individuals:
+
+```{r}
+region_order <- c(
+  "Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20",
+  "Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19",
+  "Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7"
+)
+pca.cluster$Cluster <- factor(pca.cluster$Group, levels = region_order)
+
+# Define clusters by region
+West_clusters    <- c("Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20")
+Central_clusters <- c("Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19")
+East_clusters    <- c("Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7")
+
+# Assign colors by cluster
+library(RColorBrewer)
+W.cols <- setNames(brewer.pal(n = length(West_clusters), "Reds"), West_clusters)
+C.cols <- setNames(brewer.pal(n = length(Central_clusters), "Blues"), Central_clusters)
+E.cols <- setNames(brewer.pal(n = length(East_clusters), "Greens"), East_clusters)
+bg <- c(W.cols, C.cols, E.cols)
+
+pca.cluster.norel <- pca.cluster %>% filter(!ind %in% c("25N17424", "25N17421", "25N17432", "25N03069", "25N03072", "25N03076", "25N19612"))
+nrow(pca.cluster.norel)
+rel.nr <- ggplot(pca.cluster.norel, aes(
+    x = PC1, 
+    y = PC2, 
+    col = Group,
+    text = paste0(
+        "ID: ", ind, "<br>",
+        "Group: ", Group, "<br>",
+        "PC1: ", round(PC1, 4), "<br>",
+        "PC2: ", round(PC2, 4)
+    )
+)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+rel.nr
+
+ggsave("BANS_bestindv_overall_noimputed_norel_PCA.png")
+```
+Changing the cluster colors to make more sense...
+
+```{r}
+library(ggrepel)
+
+meta.b.unique <- meta.b %>%
+  group_by(Pop) %>%
+  slice(1) %>%
+  ungroup()
+
+meta.b.unique$Pop <- factor(meta.b.unique$Pop, levels = region_order)
+
+breeding.sf <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>% filter(season=="breeding")
+
+meta.b.unique <- meta.b.unique %>%
+  mutate(PlateShape = case_when(
+    Lib.Plate.Name %in% c("BANS WGLC Plate A", "BANS WGLC Plate B") ~ "Original Samples",
+    Lib.Plate.Name == "BANS WGS 003" ~ "New Samples",
+    TRUE ~ "Other"
+  ))
+meta.b.unique$PlateShape <- factor(
+  meta.b.unique$PlateShape,
+  levels = c("Original Samples", "New Samples", "Other")
+)
+
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_sf(data=breeding.sf, fill="lightgrey", alpha=.4)+
+  
+  # Points (colored by Pop)
+  geom_point(
+    data = meta.b.unique,
+    aes(x = Long, y = Lat, color = Pop, shape = PlateShape),
+    size = 2.5
+  ) +
+
+  # Labels (label is CityTown, color not mapped)
+  geom_text_repel(
+    data = meta.b.unique,
+    aes(x = Long, y = Lat, label = CityTown),
+    size = 1.5,
+    fontface = "bold",
+    box.padding = 0.3,
+    point.padding = 0.2,
+    segment.size = 0.3,
+    segment.color = "black",
+    max.overlaps = Inf,
+    min.segment.length = .1
+  ) +
+  scale_shape_manual(
+    values = c(
+      "Original Samples" = 16,     # filled circle
+      "New Samples" = 17,   # filled triangle
+      "Other" = 15       # optional fallback (square)
+    ),
+    name = "Library Plate"
+  ) +
+  
+  scale_colour_manual(values = bg, name = "Spatial Clusters") +
+  coord_sf(xlim = c(-165, -55), ylim = c(15, 80)) +
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+
+p
+ggsave("cluster_bestindv_newcol_plot.png")
+```
+
+```{r}
+
+N_clusters    <- c("Cluster_1", "Cluster_5", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_3", "Cluster_17", "Cluster_8", "Cluster_16")
+S_clusters <- c("Cluster_2", "Cluster_20", "Cluster_18", "Cluster_19", "Cluster_21")
+E_clusters    <- c("Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7")
+
+# Assign colors by cluster
+library(RColorBrewer)
+N.cols <- setNames(brewer.pal(n = length(N_clusters), "Reds"), N_clusters)
+S.cols <- setNames(brewer.pal(n = length(S_clusters), "Blues"), S_clusters)
+E.cols <- setNames(brewer.pal(n = length(E_clusters), "Greens"), E_clusters)
+bg <- c(N.cols, S.cols, E.cols)
+
+rel.nr <- ggplot(pca.cluster.norel, aes(
+    x = PC1, 
+    y = PC2, 
+    col = Group,
+    text = paste0(
+        "ID: ", ind, "<br>",
+        "Group: ", Group, "<br>",
+        "PC1: ", round(PC1, 4), "<br>",
+        "PC2: ", round(PC2, 4)
+    )
+)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+ggplotly(rel.nr)
+
+ggsave("BANS_bestindv_overall_noimputed_norel_PCA.png")
+```
+# Comparison to old stuff
+```{r}
+plink_pca <- read.table("../03.GEA/pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenvec", header = TRUE)
+eigenval <- scan("../03.GEA/pop_struc/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.eigenval")
+
+pca05 <- plink_pca %>% dplyr::select(-IID)
+names(pca05)[1] <- "ind"
+nrow(pca05)
+
+pve05 <- data.frame(PC = 1:138, pve = eigenval/sum(eigenval)*100)
+
+pca.cluster <- left_join(pops, pca05, by="ind") %>% filter(ind %in% pca05$ind)  # left_join PCA first to preserve PC columns
+
+pca.cluster$Group <- factor(pca.cluster$Group, levels = region_order)
+
+# Plot
+b05 <- ggplot(pca.cluster, aes(
+    x = PC1, 
+    y = PC2, 
+    col = Group,
+    text = paste0(
+        "ID: ", ind, "<br>",
+        "Group: ", Group, "<br>",
+        "PC1: ", round(PC1, 4), "<br>",
+        "PC2: ", round(PC2, 4)
+    )
+)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+b05
+ggsave("old_PCA_new_col.png")
+```
+
+# other stats
+```{bash}
+bcftools stats ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.IDs.vcf > stats.txt
+```
+
+# Resulting decisions
+Well, first obvious one is to drop that one individual that has like 80% missing data. Let's just glance at how many "bad" ones we have:
+```{r}
+meta.all <- meta.all %>% rename(BGP_ID=sample)
+meta.worst <- meta.all %>% filter(F_MISS>=.3)
+meta.best <- meta.all %>% filter(F_MISS<.3)
+nrow(meta.worst)
+
+meta.worst %>% dplyr::select(BGP_ID) %>% write_delim("high_miss_samples.txt", col_names=F)
+```
+
+That would still leave a good number of individuals, like 209. I doubt I would lose locations... let's double check that though.
+
+```{r}
+BANS.all <- read_csv("../../data/BANS_all_sample_data.csv") 
+
+BANS.seq <- BANS.all %>% filter(BGP_ID %in% meta.all$BGP_ID)
+nrow(BANS.seq)
+BANS.seq %>%
+  group_by(CityTown) %>%
+  summarize(n=n())
+
+BANS.seq.best <- BANS.all %>% filter(BGP_ID %in% meta.best$BGP_ID)
+nrow(BANS.seq)
+length(unique(BANS.seq$CityTown))
+
+BANS.seq.best %>%
+  group_by(CityTown) %>%
+  summarize(n=n())
+```
+Me thinks we won't lose any locations, just 20 individuals (although we have some spots that are <4 samples, I think with the climate grouping we do down the line it will be okay).
+
+```{bash}
+bcftools view -S ^high_miss_samples.txt ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz  -Oz -o ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.bestindv.vcf.gz
+
+#just to double check...
+bcftools query -l ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.IDs.bestindv.vcf > BANS_best_sample_list.txt
+wc -l BANS_best_sample_list.txt
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf_final/eval/BANS_best_sample_list.txt /Users/ericarobertson/Desktop/BANS_adaptive_units/data
+```
+

@@ -14,58 +14,262 @@ library(ggplot2)
 library(tidyverse)
 library(terra)
 ```
-# Running the GAMM
+# Introduction
+Following recommendations from Pederson et al 2019 "Hierarchical generalized additive models in ecology: an introduction with mgcv". The idea here is to use a HGAM and see if including per group (AU) smoothing parameters improves the model over using a universal smoothing function.
+
+So, the paper lays out the three questions I need to address:
+1. Should each group have its own smoother, or will a common smoother suffice?
+So, this is the big questions. I'm going to do two versions, one with a common (global) smoother and another where each group has its own smoother.
+2. Do all of the group-specific smoothers have the same wiggliness, or should each group have its own smoothing parameter?
+I think they should each have their own smoothing parameter... wiggliness..
+3. Will the smoothers for each group have a similar shape to one another—a shared global smoother?
+For simplicity, I think they'll have a similar shape.
+
+The main question is does including adaptive units improve the models for predicting abundance trend. The idea is that if they are adaptively different they should respond to the environmental changes differently. So, allowing for unique within group relationships versus forcing a global relationship should make the model better.
+
+Then, I also want to try and use the best model to predict abundance trend within adaptive unit (assuming that AU is in the better model).
+
+So, this all leaves me with a couple models to test:
+1. A single common smoother for all observations; We will refer to this as model G, as it only has a Global smoother.  
+2. A global smoother plus group-level smoothers that have the same wiggliness. We will refer to this as model GS (for Global smoother with individual effects that have a Shared penalty).  
+3. A global smoother plus group-level smoothers with differing wiggliness. We will refer to this as model GI (for Global smoother with individual effects that have Individual penalties).  
+4. Group-specific smoothers without a global smoother, but with all smoothers having the same wiggliness. We will refer to this as model S.  
+5. Group-specific smoothers with different wiggliness. We will refer to this as model I.
+
+So, my plan is going to be using model 1 (G) as my baseline, null hypothesis model. Then the first test with me G versus GS. I then want to test G versus S (so, individual smoothers but no global). Then... I guess I want to check GS versus GI (assuming the global addition helps) or S versus I.
+
+# Making the Models
+## data
 ```{r}
-data <- read.csv("prelim_data.csv")
-data$group <- factor(data$group)
+data <- read.csv("spatial_predictor_data_xy.csv")
+
+#only data where I had a good AU assignment
+clean.data <- data %>% filter(!AU=="Group_NA")
+nrow(clean.data)
+
+clean.data <- clean.data %>%
+  mutate(AU = as.integer(sub("Group_", "", AU)))
+
+clean.data$AU <- factor(clean.data$AU)
 ```
 
-Visualizing the data.
-```{r}
-data <- read.csv("prelim_data.csv")
-data$group <- as.factor(data$group)
-
-ggplot(data %>% filter(group==3), aes(x = mean, y = abd_trend, color=group)) +
-  geom_point(size = 2, alpha = 0.7) +
-  theme_minimal() +
-  labs(x = "Temperature change", y = "Trend", color = "Group")
-
-# Add smooths (nonparametric loess just for visualization)
-ggplot(data, aes(x = mean, y = lc_cropland, color = group)) +
-  geom_point(size = 2, alpha = 0.6) +
-  geom_smooth(method = "gam", se = TRUE) +
-  theme_minimal() +
-  labs(x = "Temperature change", y = "Trend", color = "Group")
-
-```
-Does seem like a GAM might be a good approach for groups 2 and 3. Group 1, however, is really limited datawise. I think it's worth dropping that group for now as it might mess up the overall model fit.
-
-```{r}
-data.no1 <- data %>% filter(group!=1)
-#only lost like 20 points! So, yeah, not great...
-```
-
-Now let's try and run some GAM models.
-The following model will be used, where X_y and X_z are examples of predictors. This model includes smoothing functions and interaction terms between the predictors (Wood 2017).
-
-trend ~ s(X_y)+s(X_z) + ti(X_y,X_z) 
+## G
+gam(log(uptake) ∼ s(log(conc), k=5, bs="tp") +  s(Plant_uo, k=12, bs="re"),  data=CO2, method="REML", family="gaussian")
 ```{r}
 library(mgcv)
-#s() is allowing the temperature to vary across space, spatially varying effect approach
-m.test <- gam(abd_trend ~ s(mean, k = 5), data=data)
-summary(m.test)
-plot(m.test)
-#could already be removing one of the three categories, because it's a factor it's already
-m <- gam(abd_trend ~ s(mean, k = 5) + group, data = data)
-summary(m)
-plot(m)
-#this is smoothing each group separately
-m2 <- gam(abd_trend ~ s(mean, by = group, k = 10) + group, data = data)
-summary(m2)
-plot(m2)
+library(gratia)
 
-#projection for lat and long might be problematic, the dimensions change as they get more towards the poles
-m2 <- gam(abd_trend ~ s(mean, by = group, k = 10) + group + s(lat) + s(long), data = data)
-summary(m2)
+modG.temp <- gam(abd_trend ~ s(tmax_june_delta, k = 15, bs="tp") + s(AU, k=2, bs = "re"), data = clean.data, method="REML")
+
+mgcv::gam.check(modG.temp)
+
+summary(modG.temp)
 ```
-To get the actual affect of group 2 and 3, need to add in the intercept to the Estimate. This is because the intercept is capturing group 1.
+Okay, so this is looking like a pretty good model! 30.8% deviance explained is really good, and all of the terms are significant.
+
+```{r}
+draw(modG.temp)
+```
+So, I originally had lat long in this model to try and account for spatial autocorrelation but that seems to be overwhelming it (as the abundance trend is already a spatially smoothed product?). So, removing that, I think, may give a better model for what I'm lookin at. Below: testing for deviance explained with just the spatial structure, it's huge! Too much.
+```{r}
+mod.space <- gam(abd_trend ~ s(x, y, k = 200, bs = "tp"),
+                 data = clean.data, method="REML")
+
+summary(mod.space)$dev.expl
+```
+
+## GS
+gam(log(uptake) ∼ s(log(conc), k=5, m=2) +  s(log(conc), Plant_uo, k=5, bs="fs", m=2),  data=CO2, method="REML")
+```{r}
+library(mgcv)
+library(gratia)
+
+modGS.temp <- gam(abd_trend ~ s(tmax_june_delta, k = 15, bs="tp") + s(tmax_june_delta, AU, k = 15, bs="fs"), data = clean.data, method="REML")
+
+#mgcv::gam.check(modGS.temp)
+
+summary(modGS.temp)
+```
+Okay, so this is looking slightly better as a model. The global smoother is still slightly significant, but the AU group level smoothing is high significant, suggesting that including AU is a good thing. Also, the deviance explained went up to 35.1%.
+
+```{r}
+draw(modGS.temp)
+```
+
+## GI
+gam(log(uptake) ∼ s(log(conc), k=5, m=2, bs="tp") +  s(log(conc), by=Plant_uo, k=5, m=1, bs="tp") +  s(Plant_uo, bs="re", k=12),  data=CO2, method="REML")
+```{r}
+library(mgcv)
+library(gratia)
+
+modGI.temp <- gam(abd_trend ~ s(tmax_june_delta, k = 15, bs="tp") + s(tmax_june_delta, by=AU, m=2, k = 15, bs="fs") + s(AU, k=2, bs="re"), data = clean.data, method="REML")
+
+#mgcv::gam.check(modGI.temp)
+
+summary(modGI.temp)
+```
+Okay, so this is looking similar to GS, but including the random effect of AU is still showing up as a signficant. Also, we're seeing that when you split up the AU and allow for wiggliness, both are coming out as significant. We lose the effect of just delta_Tavg, which is interesting... maybe suggests that a global smoother isn't relevant (which I guess make sense biologically). We also see that including a random effect for AU is significant.
+
+```{r}
+draw(modGI.temp)
+```
+
+## S
+gam(log(uptake) ∼ s(log(conc), Plant_uo, k=5, bs="fs", m=2),  data=CO2, method="REML")
+```{r}
+library(mgcv)
+library(gratia)
+
+modS.temp <- gam(abd_trend ~ s(tmax_june_delta, AU, m=2, k = 15, bs="fs"), data = clean.data, method="REML")
+
+#mgcv::gam.check(modS.temp)
+
+summary(modS.temp)
+```
+Again, pretty similar. Removing the global term but making all the AU's act similarly.
+
+```{r}
+draw(modS.temp)
+```
+## I
+gam(log(uptake) ∼ s(log(conc), by=Plant_uo, k=5, bs="tp", m=2) +  s(Plant_uo, bs="re", k=12),  data=CO2, method="REML")
+```{r}
+library(mgcv)
+library(gratia)
+
+modI.temp <- gam(abd_trend ~ s(tmax_june_delta, by=AU, m=2, k = 15, bs="fs") + s(AU, bs="re", k=2), data = clean.data, method="REML")
+
+mgcv::gam.check(modI.temp)
+
+summary(modI.temp)
+```
+Similar again to GI, but I think this is actually better because the global smoother wasn't even significant in GI, so why not just remove it.
+
+```{r}
+draw(modI.temp)
+```
+# Interpretations
+So, I'm going to use ~biology~ to interpret things. Two main questions:
+1. Does including AU improve the models?
+2. What do the different ways of including AU tell us about how the groups respond to temperature?
+
+## Model Summary
+*modG: global temperature smooth + random AU intercept*
+abd_trend ~ s(tmax_delta) + s(AU, bs="re")
+AU only changes the mean level of abundance trend (intercept), but not the shape of the temperature response.
+
+*modGS: global smooth + factor-smooth interaction (AU-specific smooths)*
+abd_trend ~ s(tmax_delta) + s(tmax_delta, AU, bs="fs")
+Each AU gets its own smooth response to temperature, but they are partially pooled (shrinkage).
+
+*modGI: global smooth + AU-specific smooths + AU random intercept*
+abd_trend ~ s(tmax_delta) + s(tmax_delta, by=AU, bs="fs") + s(AU, bs="re")
+Same as modGS but decomposes: 1. global smooth, 2.AU-specific deviations, 3. AU random intercept. This separates mean shifts from temperature-response differences.
+
+*modS: only AU-specific smooths*
+abd_trend ~ s(tmax_delta, AU, bs="fs")
+No global trend — abundance–temperature relationship is entirely AU-specific.
+
+*modI: AU-specific smooths + AU random intercept*
+abd_trend ~ s(tmax_delta, by=AU, bs="fs") + s(AU, bs="re")
+No global smooth; AU-specific curves + AU mean shifts.
+
+## Question 1
+Yes, including AU certainly improves the models.
+modG, which has no AU-temperature interaction, only has a deviance explained of 30.8%. The termperature smooth is strongly significant but so is the AU random effect. So, temperature alone is explaining some variation but also AU differences in mean abundance trend exist. When we include AU specific smoothing parameters, as in all other models, the deviance explained goes up 4.3% so 35.1% overall (generally, across models). So yes, it's a better model when you allow for AU specific responses.
+
+## Question 2
+This is where it gets really cool. When you allow AUs to have *different* temperature response curves, the global smooth become irrelevant. GI exemplifies this the best, the global smooth basically vanishes in importance (p=0.776). So, this suggests that this species does *not* have one unified temperature-abundance trend relationship but rather that each AU has its own distinct cliamte response curve. In fact, we see not only that AU's have specific responses but that they vary in the shape of the curve and in mean abundance trends.
+
+So, from this models, the conclusions are:
+1. AUs differ markedly in how abundance trends respond to temperature.
+This is the consistent signal across modGS, modGI, modS, and modI.
+
+2. There is barely any species-wide, shared temperature–trend relationship.
+The global smooth goes non-significant in modGI.
+
+3. The biggest explanatory gain comes from modeling AU-specific curves.
+All models with AU-specific curves jump to 35% deviance explained.
+
+4. AU random effects remain highly significant.
+Baseline abundance trends differ among AUs in addition to response curves.
+
+5. Temperature affects abundance differently in AU1 vs AU2, and the shapes of the smooths are quite different.
+The edf values (12.4 and 10.0 for AU-specific smooths) indicate complex, nonlinear, distinct responses.
+
+# Figures
+```{r}
+draw(modI.temp)
+```
+We can see that delta_tavg for AU1 has a very different curve than AU2.
+
+```{r}
+ds <- difference_smooths(modI.temp,
+                         smooth = "s(tmax_delta)",
+                         pair = c("AU1", "AU2"))
+
+draw(ds)
+```
+# Testing other environmental variables
+The other problem is that I have a lot of variables to test, so I'm going to approach this with an informed biological approach.
+
+Potential variables:
+Climatic-> https://www.climatologylab.org/terraclimate.html
+change in... 1. aet (Actual Evapotranspiration), 2. def (Climate Water Deficit), 3. pet (Potential evapotranspiration), 4. *ppt (Precipitation)*, 5. *soil (Soil Moisture)*, 6.
+*tmax (Max Temperature)*, 7. *tmin (Min Temperature)*, 8. ws (Wind speed)
+
+Land Cover-> https://www.cec.org/north-american-land-change-monitoring-system/
+1. barrenland, 2. *cropland*, 3. forest, 4. *grassland,* 5. *shrubland*, 6. snow, 7. *urban*, 8. *water*, 9. *wetland*
+
+```{r}
+clim_vars <- c("ppt_june_delta", "soil_june_delta", "tmax_june_delta", 
+               "tmin_june_delta", "ws_june_delta")
+```
+
+```{r}
+fit_I_model <- function(var) {
+  
+  # Build the formula programmatically
+  f <- as.formula(paste0(
+    "abd_trend ~ ",
+    "s(", var, ", by = AU, m = 2, k = 15, bs = 'fs') + ",
+    "s(AU, bs = 're', k = 2)"
+  ))
+  
+  gam(f, data = clean.data, method = "REML")
+}
+
+models_I <- lapply(clim_vars, fit_I_model)
+names(models_I) <- clim_vars
+```
+
+```{r}
+summary(models_I$ppt_june_delta)
+summary(models_I$soil_june_delta)
+summary(models_I$tmax_june_delta)
+summary(models_I$tmin_june_delta)
+summary(models_I$ws_june_delta)
+```
+
+Predictor	        DevExpl(%)	Scale	  edf AU1	  F AU1	  edf AU2	F AU2
+ppt_june_delta	  17.6	      395.09	11.87	    68.16	  2.50	  96.41
+soil_june_delta	  21.0	      379.23	13.59	    88.00	  8.63	  29.78
+tmax_june_delta	  35.1	      311.66	12.42	    205.92	10.01	  42.83
+tmin_june_delta	  17.6	      395.58	12.48	    60.72	  9.87	  36.13
+ws_june_delta	    5.1	        455.03	10.79	    6.48	  6.53	  12.58
+
+1. Best Predictor: tmax_june_delta
+Highest deviance explained (35.1%)
+Lowest residual variance (Scale = 311.66)
+Strongest nonlinear response in AU1 (edf = 12.4, F = 205.9)
+Strong nonlinear response in AU2 (edf = 10.0, F = 42.8)
+
+*Tmax is the strongest climate driver of BANS abundance trends.*
+
+2. Second Best: soil_june_delta
+Moderate deviance explained (21%)
+Moderate-low scale
+AU1: strong complex response (edf ~ 13.6, F = 88)
+AU2: moderate response (edf ~ 8.6, F = 29.8)
+*Soil/water balance changes likely meaningful, but not as predictive as Tmax.*
+
