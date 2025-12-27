@@ -50,6 +50,9 @@ Due to size and privacy constraints, the following are NOT included in this repo
 # Workflow Step-by-step (expanded methodology)
 workflow_diagram.png
 
+# AI Use Disclosure
+The author used ChatGPT (OpenAI) as a supportive tool during the research and writing process. Specifically, ChatGPT was used to assist with grammar and readability editing of text, to help troubleshoot and draft computational code (e.g., R, bash, and bioinformatics workflows), and to clarify statistical and programming concepts during method development. All code was reviewed, modified, tested, and validated by the author, and all scientific decisions, analyses, and interpretations were made by the author. ChatGPT was not used to generate hypotheses, analyze data, interpret results, or draw scientific conclusions.
+
 
 
 
