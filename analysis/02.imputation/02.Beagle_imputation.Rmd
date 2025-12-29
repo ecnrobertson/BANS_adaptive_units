@@ -1,0 +1,416 @@
+---
+title: "Imputation with beagle"
+author: "Christen Bossu"
+date: "10/21/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Programs you will need
+beagle: for imputation
+bcftools: for counting variants per scaffold
+vcftools: for filtering out scaffolds that only have one variant
+
+## Bash and unix scripting
+Most of this will be done with bash or scripting in the terminal. I'm using Rmarkdown because I like the code chunks. But you really won't be using R (except for maybe plotting something).
+
+Another way to count the number of variants per chromosome is with bcftools. First, you need to bgzip our vcfile and index it with bcftools. I have bcftools loaded in a conda environment. __If above worked,  you can skip to the next part on line 106__
+
+```
+conda activate bcftools
+
+#from vcf/filtered_HC
+bgzip BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.5miss.0.8miss.recode.vcf
+
+#from 02.imputation
+bcftools index ../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.5miss.0.8miss.recode.vcf.gz
+```
+
+With an indexed vcf file, it's really easy to identify the next steps. Maybe not fast give thousands of scaffolds, but quicker than any other method I've found
+
+Create a chromosome list using bcftools to extract information, use uniq to remove duplicated chromosomes.
+```{bash}
+bcftools query -f '%CHROM\n' ../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf |uniq > chr_file
+
+
+cat chr_file|head -5
+```
+
+CM026847.1
+CM026848.1
+CM026849.1
+CM026850.1
+CM026851.1
+
+Now we want to count the number of variants per chromosme. Here's one way you do it for one scaffold/chromosome. Note, that it's actually 
+1) view the vcf, for one region (aka scaffold), then pipe in a grep command to remove comment in vcf (^#= starts with #), and the -c means to count the number of occurances.
+
+```{bash}
+vcf_in="../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf"
+bcftools view -r 'Scaffold_1__1_contigs__length_151072562' ROFI203_14Island_Asian.pass-maf-0.05.biallelic.SNP.8miss.rm_batcheff19.rmdup.rmrel.recode.vcf.gz | grep -v -c '^#'
+
+#Scaffold_1
+##729289
+```
+
+Let's create a bash script to do this for all scaffolds
+
+```
+nano variant_count.sh
+
+vcf_in="../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf"
+bgzip $vcf_in
+bcftools index ../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf.gz
+```
+
+```
+#!/bin/bash
+#
+#SBATCH --job-name=count
+#SBATCH --output=count.%j.out
+#SBATCH --error=count.%j.err
+#################
+#SBATCH -t 1:00:00
+#SBATCH -p amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 2
+#SBATCH --mem=6G
+#################
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=ericacnr@colostate.edu
+##################
+#echo commands to stdout
+
+source ~/.bashrc
+
+conda activate bioinf
+
+chromlist=($(cat chr_file))
+vcf_in="../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf.gz"
+
+for chrom in "${chromlist[@]}"; do
+  count=$(bcftools view -r "$chrom" "$vcf_in" | grep -vc '^#')
+  echo "$chrom:$count" >> spchrom.txt
+done
+```
+
+Once it finishes, you should have a file called spchrom.txt. What we want for beagle is to identify only the scaffolds with 1 variant
+
+```
+cat spchrom.txt|tr ":" "\t"| awk '$2<10{print$1}' > singleton.chr.txt
+```
+
+
+Create a new bash script to just get the chromosome and position for the singleton chromosomes
+
+```
+vcf_in="../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf.gz"
+
+chromlist=($(cat singleton.chr.txt))
+
+for chrom in ${chromlist[@]}
+do
+count=$(bcftools query -r $chrom -f '%CHROM\t%POS\n' $vcf_in| grep -v '^#')
+echo "$count" >> singleton_lth10_pos_bcftools.txt
+done
+```
+
+Now we want to remove these positions from the original vcf file, and we can do this with vcftools --exclude-positions 
+
+```
+vcf_in="../01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf.gz"
+
+vcftools --gzvcf $vcf_in \
+--out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10 \
+--exclude-positions singleton_lth10_pos_bcftools.txt --recode
+```
+
+Now you have a vcf file without chromsomes with only one loci (less than 10). Fingers crossed beagle does not throw and error.
+
+I have beagle in another conda environment, and I have a slurm script to run this on the summit cluster, with 24 cores.
+
+After filtering, kept 3123809 out of a possible 3124151 Sites
+
+```{}
+#!/bin/bash
+#
+#SBATCH --job-name=impute
+#SBATCH --output=impute.%j.out
+#SBATCH --error=impute.%j.err
+#SBATCH -t 6:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 11
+#SBATCH --mem=40G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+set -x
+source ~/.bashrc
+
+BEAGLE_JAR="/projects/ericacnr@colostate.edu/mambaforge/envs/bioinf/java/beagle.27Jan18.7e1.jar"
+vcf="BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.vcf.gz"
+
+java -Xss5m -Xmx90g -jar $BEAGLE_JAR \
+  gtgl=$vcf \
+  out=BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf \
+  nthreads=48
+```
+
+# Problem Shooting
+Okay so the imputation in repeatedly failing at the same SNP (CM026855.1	15386922), so I'm going to try removing that SNP and see if it can complete the imputation properly. I can't see anything wrong with this SNP that might be causing it to fail but I need this done!!
+
+```{bash}
+bcftools view \
+   --exclude 'CHROM="CM026855.1" && POS=15386922' \
+   -Oz -o BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.gdsnps.vcf.gz \
+   BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.vcf.gz
+
+#verify that it worked
+bcftools index BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.gdsnps.vcf.gz
+bcftools view -r CM026855.1:15386922 BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.gdsnps.vcf.gz
+```
+
+Trying again.
+```{bash}
+BEAGLE_JAR="/projects/ericacnr@colostate.edu/mambaforge/envs/bioinf/java/beagle.27Jan18.7e1.jar"
+
+vcf="BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.gdsnps.vcf.gz"
+
+java -Xss5m -Xmx90g -jar $BEAGLE_JAR \
+  gtgl=$vcf \
+  out=BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.gdsnps.vcf \
+  nthreads=25
+```
+
+Now I'm getting a haploid error for this SNP: CM026855.1	23395646
+```{r}
+bcftools view \
+   --exclude 'CHROM="CM026855.1" && POS=23395646' \
+   -Oz -o BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.gdsnps2.vcf.gz \
+   BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.gdsnps.vcf.gz
+```
+
+
+## splitting up by scaffolds
+The above didn't work, it just failed one snp over.
+
+```{bash}
+IN_VCF="BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.rm_scaf_lth10.recode.vcf.gz"
+
+bcftools query -f '%CHROM\n' "$IN_VCF" | uniq -u > chr_list.txt
+```
+
+making big_scaffolds
+
+cat <<EOF > big_scaffolds.txt
+...
+EOF
+
+cat <<EOF > small_scaffolds.txt
+...
+EOF
+
+within a sub directory split_vcf...
+```{bash}
+while read -r CHR; do
+  echo "Creating VCF for big scaffold $CHR ..."
+  bcftools view -r "$CHR" "$IN_VCF" -Oz -o BANS.big.${CHR}.vcf.gz
+  tabix -p vcf BANS.big.${CHR}.vcf.gz
+done < big_scaffolds.txt
+
+bcftools view -r small_scaffolds.txt "$IN_VCF" -Oz -o BANS.small_scaffolds.vcf.gz
+tabix -p vcf BANS.small_scaffolds.vcf.gz
+```
+
+Now building a loop
+```{bash}
+#!/bin/bash
+#
+#SBATCH --job-name=impute
+#SBATCH --output=impute.%j.out
+#SBATCH --error=impute.%j.err
+#SBATCH -t 1:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 11
+#SBATCH --mem=40G
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+set -x
+source ~/.bashrc
+
+#for chrom in `ls BANS.big.* | cut -f3 -d'.'`; do echo $chrom; sbatch imputation.sbatch $chrom; done
+
+BEAGLE_JAR="/projects/ericacnr@colostate.edu/mambaforge/envs/bioinf/java/beagle.27Jan18.7e1.jar"
+
+chrom=$1
+
+java -Xss5m -Xmx90g -jar $BEAGLE_JAR \
+  gtgl=BANS.big."$chrom".1.vcf.gz \
+  out=BANS."$chrom" \
+  nthreads=25
+```
+
+and the small chroms
+```{bash}
+#!/bin/bash
+#
+#SBATCH --job-name=impute
+#SBATCH --output=impute.%j.out
+#SBATCH --error=impute.%j.err
+#SBATCH -t 1:30:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 11
+#SBATCH --mem=40G
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+set -x
+source ~/.bashrc
+
+BEAGLE_JAR="/projects/ericacnr@colostate.edu/mambaforge/envs/bioinf/java/beagle.27Jan18.7e1.jar"
+
+vcf="BANS.small_scaffolds.vcf.gz"
+
+java -Xss5m -Xmx90g -jar $BEAGLE_JAR \
+  gtgl=$vcf \
+  out=BANS.small \
+  nthreads=25
+```
+
+make a list of the files called imputed_vcfs.list
+
+```{bash}
+bcftools concat \
+  -Oz \
+  -o BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf.gz \
+  $(cat imputed_vcfs.list)
+  
+tabix -p vcf BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf.gz
+bcftools stats BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf.gz > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.stats
+```
+
+Hilarious, now I've got more snps than expected! Originally 3123809, now 4765431. Gained 1641622??
+
+Checking for dups
+```{bash}
+bcftools query -f '%CHROM\t%POS\n' BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf.gz \
+  | sort \
+  | uniq -d > duplicated_positions.txt
+  
+wc -l duplicated_positions.txt
+```
+
+Hmmm
+
+```{bash}
+FASTA="/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/resources/genome.fasta"
+bcftools norm \
+  -d all \
+  -f "$FASTA" \
+  BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf.gz \
+  -Oz -o BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1_nodup.vcf.gz
+```
+
+So, checking each separate file.
+```{bash}
+for orig in BANS.big.CM*.vcf.gz; do
+  # strip path and .vcf.gz
+  base=$(basename "$orig" .vcf.gz)
+
+  # base looks like: BANS.big.CM026856.1
+  # extract scaffold with suffix (.1) and without
+  scaf_with_suffix=${base#BANS.big.}      # CM026856.1
+  scaf=${scaf_with_suffix%.1}             # CM026856
+
+  # corresponding imputed file name (adjust if yours differ)
+  imp="BANS.${scaf}.vcf.gz"
+
+  if [ ! -f "$imp" ]; then
+    echo "WARNING: missing imputed file for $scaf: $imp" >&2
+    echo -e "${scaf}\tNA\tNA\t${orig}\tMISSING_${imp}" >> scaffold_mismatches.tsv
+    continue
+  fi
+
+  # count non-header variants
+  n_orig=$(bcftools view -H "$orig" | wc -l)
+  n_imp=$(bcftools view -H "$imp" | wc -l)
+
+  if [ "$n_orig" -ne "$n_imp" ]; then
+    echo "Mismatch for $scaf: orig=$n_orig, imputed=$n_imp"
+    echo -e "${scaf}\t${n_orig}\t${n_imp}\t${orig}\t${imp}" >> scaffold_mismatches.tsv
+  fi
+done
+```
+
+
+Mismatch for CM026848: orig=364028, imputed=728056
+Mismatch for CM026849: orig=342789, imputed=685578
+Mismatch for CM026851: orig=225746, imputed=451492
+Mismatch for CM026852: orig=204428, imputed=408856
+Mismatch for CM026854: orig=112070, imputed=224140
+Mismatch for CM026855: orig=105645, imputed=97000
+Mismatch for CM026856: orig=94010, imputed=188020
+Mismatch for CM026857: orig=76220, imputed=152440
+Mismatch for CM026858: orig=78175, imputed=156350
+Mismatch for CM026859: orig=74241, imputed=148482
+Mismatch for CM026861: orig=60609, imputed=121218
+Mismatch for CM026869: orig=21765, imputed=43530
+Mismatch for CM026870: orig=17118, imputed=34236
+Mismatch for CM026871: orig=16637, imputed=33274
+Mismatch for CM026872: orig=12843, imputed=25686
+Mismatch for CM026873: orig=16679, imputed=33358
+Mismatch for CM026874: orig=9354, imputed=18708
+Mismatch for CM026884: orig=24280, imputed=48560
+
+So most of them are fucked. Most of them are doubled, which explains the higher post cat count. Removing them all, redoing them all.
+
+Haha we're back to the cursed Chrom CM026855.1! 23395646 is showing as haploid for at least one indv... I stg if that was the only problem and I did all this...
+
+```{r}
+bcftools view \
+   --exclude 'CHROM="CM026855.1" && POS=23395646' \
+   -Oz -o BANS.big.CM026855.1.2.vcf.gz \
+   BANS.big.CM026855.1.vcf.gz
+
+bcftools index BANS.big.CM026855.1.2.vcf.gz
+bcftools view -r CM026855.1:23395646 BANS.big.CM026855.1.2.vcf.gz
+```
+
+Finally! After reimputing that one, I think everything is as it should be (minus that one weird SNP).
+
+```{bash}
+bcftools concat \
+  -Oz \
+  -o BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.vcf.gz \
+  $(cat imputed_vcfs.list)
+  
+tabix -p vcf BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.vcf.gz
+bcftools stats BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.vcf.gz > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.stats
+
+#double check for missingness
+vcftools --gzvcf BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.vcf.gz --missing-indv
+bcftools view -H -i 'GT="mis"' BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.vcf.gz | wc -l
+```
+
+Incredible! Redid the cat and I finally have 3123808 SNPs. Unclear why removing that weird SNP didn't solve the issue before breaking up the chroms, or maybe it did and I missed it somehow. Anyway, onward!
+
+/scratch/alpine/ericacnr@colostate.edu/BANS/02.imputation/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf.gz
+
+
+

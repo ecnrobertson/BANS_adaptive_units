@@ -1,0 +1,758 @@
+---
+title: "02.5.2.eems_overall"
+output: html_document
+---
+# libraries
+```{r}
+library(rnaturalearth)
+library(ggplot2)
+library(sf)
+library(terra)
+library(dplyr)
+library()
+```
+
+# installs
+installing feems into a conda environment called feems_py310
+```{bash}
+conda create -n feems_py310 python=3.10 -y
+conda activate feems_py310
+
+# Use conda-forge for compiled wheels consistently
+mamba install -c conda-forge numpy=1.23.* scipy pandas scikit-learn matplotlib statsmodels \
+  shapely pyproj fiona geopandas -y
+
+# Then install feems + pandas-plink
+pip install feems pandas-plink
+install -c bioconda feems -c conda-forge
+```
+
+# input files
+## PLINK files
+These have already been made for the population structure stuff, so I'm using those:
+/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/BANS.all.recode
+
+## coords file
+Need the sample order from the fam file
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/BANS.all.recode.fam /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs
+```
+
+```{r}
+fam <- read.table("BANS.all.recode.fam",
+  stringsAsFactors = FALSE
+)
+
+colnames(fam)[1:2] <- c("FID", "IID")
+
+meta <- read.csv("../../data/BANS_all_sample_data_shifted.csv") %>% select(BGP_ID, Long, Lat) %>% rename(IID=BGP_ID)
+
+coords_df <- left_join(fam, meta, by="IID")
+
+#project coordinates to better system
+coords_sf <- st_as_sf(
+  coords_df,
+  coords = c("Long", "Lat"),
+  crs = 4326
+)
+
+coords_proj <- st_transform(coords_sf, 5070)
+
+#get coords input file
+xy <- st_coordinates(coords_proj)
+
+write.table(
+  xy,
+  file = "BANS.coords.txt",
+  row.names = FALSE,
+  col.names = FALSE,
+  quote = FALSE
+)
+```
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs/BANS.coords.txt ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/
+```
+## boundary shape file
+```{r}
+#north america without political boundaries
+map <- ne_states(country = c("United States of America", "Canada"), 
+                 returnclass = 'sf')
+na_union <- st_union(map)
+
+#BANS breeding range
+breeding.sf <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>% filter(season=="breeding") %>% st_transform(crs(map))
+
+#clip BANS range to just NA and make a single, clean polygon
+breeding_na <- st_intersection(breeding.sf, na_union)
+breeding_na <- st_make_valid(breeding_na)
+
+breeding_outer <- st_union(breeding_na)
+
+#project to match the coords file
+breeding_outer_proj <- st_transform(breeding_outer, 5070)
+
+#get outer boundary
+outer_coords <- st_coordinates(breeding_outer_proj)[, 1:2]
+
+write.table(
+  outer_coords,
+  "BANS_breeding_outer.txt",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+#make grids within the polygon (I believe this is what gets filled in with migratory surface values)
+grid <- st_make_grid(
+  breeding_outer_proj,
+  cellsize = 75000,   # 75 km
+  square = TRUE
+)
+
+grid <- st_sf(geometry = grid)
+grid <- st_intersection(grid, breeding_outer_proj)
+
+st_write(grid, "BANS_breeding_grid_75km.shp", delete_dsn = TRUE)
+
+
+plot(st_geometry(na_union), col = "grey90")
+plot(st_geometry(breeding_na), col = "steelblue", add=T)
+```
+
+Problem: Feems wants a continuous surface, not the disjointed mess that is this birds breeding range. So, I need to simplify/blend this range...
+```{r}
+outer_poly <- st_union(st_buffer(breeding_outer_proj, 100000))
+outer_poly <- st_make_valid(outer_poly)
+
+#############
+#remove texas
+st_bbox(breeding_outer_proj)
+
+clip_box <- st_as_sfc(st_bbox(c(
+  xmin = -4514069.6,
+  ymin = 321028.6 + 600000,  # move north ~300 km
+  xmax = 2798098.4,
+  ymax = 6133850.1
+), crs = st_crs(breeding_outer_proj)))
+
+rng_clipped <- st_intersection(breeding_outer_proj, clip_box)
+
+hull <- st_convex_hull(breeding_outer_proj)
+hull <- st_concave_hull(rng_clipped, allow_holes = F, ratio = 0.25)
+
+
+#############
+
+ggplot() +
+  geom_sf(data = breeding_outer_proj, fill = "red", color="red")+
+  geom_sf(data=hull, fill="yellow", alpha=0.5)
+```
+
+```{r}
+#get outer boundary
+outer_coords <- st_coordinates(hull)[, 1:2]
+
+write.table(
+  outer_coords,
+  "BANS_breeding_outer.txt",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+#make grids within the polygon (I believe this is what gets filled in with migratory surface values)
+grid <- st_make_grid(
+  hull,
+  cellsize = 75000,   # 75 km
+  square = TRUE
+)
+
+grid <- st_sf(geometry = grid)
+grid <- st_intersection(grid, hull)
+
+plot(st_geometry(grid))
+
+st_write(grid, "BANS_breeding_grid_75km.shp", delete_dsn = TRUE)
+```
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs/BANS_breeding_* ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/
+```
+# another method for input boundaries
+```{r}
+coords_sf <- st_as_sf(coords, coords = c("Long", "Lat"), crs = 5070) %>%
+  st_make_valid()
+# concave hull around coordinates
+hull <- st_concave_hull(coords_sf, allow_holes = F, ratio = 0.25)
+hull <- st_make_valid(hull)
+
+breeding.sf <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>% filter(season=="breeding") %>% st_transform(crs(map))
+
+# project and clean geometries
+range_proj <- st_transform(breeding.sf, 5070) %>% st_buffer(0)
+hull_proj  <- st_transform(hull, 5070) %>% st_buffer(0)
+
+#remove texas
+st_bbox(range_proj)
+
+clip_box <- st_as_sfc(st_bbox(c(
+  xmin = -4514069.6,
+  ymin = 321028.6 + 1500000,  # move north ~700 km
+  xmax = 2798098.4,
+  ymax = 6133850.1
+), crs = st_crs(range_proj)))
+
+rng_clipped <- st_intersection(range_proj, clip_box)
+range.hull <- st_concave_hull(rng_clipped, allow_holes = F, ratio = 0.25)
+
+# combine points poplygon and range map
+combined_proj <- st_union(range.hull, hull_proj) %>%
+  st_make_valid() %>%
+  st_union()
+
+# #buffer around new polygon
+# combined <- st_buffer(combined_proj, 50000) %>%  # 50 km
+#   st_make_valid()
+# 
+# parts <- st_collection_extract(combined, "POLYGON")
+# if (length(parts) > 1) {
+#   parts <- st_cast(parts, "POLYGON", warn = FALSE)
+# }
+# combined_poly <- parts[which.max(st_area(parts))]
+# 
+# combined_poly <- st_simplify(combined_poly, dTolerance = 30000, preserveTopology = TRUE) %>%
+#   st_make_valid()
+# 
+# # give crs
+combined_final <- st_transform(combined_proj, 5070)
+
+map <- ne_states(
+  country = c("United States of America", "Canada"),
+  returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.2) +
+  geom_sf(data = combined_final, fill = "grey70", color = "black", alpha = 0.5) +
+  geom_sf(data = coords_sf, color = "blue", size = 2)
+
+#get outer boundary
+outer_coords <- st_coordinates(combined_final)[, 1:2]
+
+write.table(
+  outer_coords,
+  "BANS_breeding_outer2.txt",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+#make grids within the polygon (I believe this is what gets filled in with migratory surface values)
+grid <- st_make_grid(
+  combined_final,
+  cellsize = 75000,   # 75 km
+  square = TRUE
+)
+
+grid <- st_sf(geometry = grid)
+grid <- st_intersection(grid, combined_final)
+
+plot(st_geometry(grid))
+
+st_write(grid, "BANS_breeding_grid_75km2.shp", delete_dsn = TRUE)
+```
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs/BANS_breeding_*2* ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/
+```
+
+## another method
+```{r}
+library(sf)
+library(dplyr)
+library(rnaturalearth)
+
+# ----------------------------
+# Inputs
+# ----------------------------
+coords_df <- coords  # must have Long/Lat columns (lon/lat)
+range_ll <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>%
+  filter(season == "breeding") %>%
+  st_make_valid()
+
+# If coords are lon/lat, this MUST be 4326 first:
+coords_sf_ll <- st_as_sf(coords_df, coords = c("Long", "Lat"), crs = 4326) %>%
+  st_make_valid()
+
+# Project everything to an equal-area CRS in meters (you chose 5070)
+coords_sf <- st_transform(coords_sf_ll, 5070)
+range_proj <- st_transform(range_ll, 5070) %>% st_make_valid() %>% st_union()
+
+# ----------------------------
+# (Optional) Clip out Texas-ish by moving ymin north.
+# Tune yshift_m until TX is excluded but everything else remains.
+# ----------------------------
+bb <- st_bbox(range_proj)
+yshift_m <- 250000  # 250 km north; adjust 150k–400k as needed
+
+clip_bb <- st_bbox(c(
+  xmin = as.numeric(bb["xmin"]),
+  ymin = as.numeric(bb["ymin"]) + yshift_m,
+  xmax = as.numeric(bb["xmax"]),
+  ymax = as.numeric(bb["ymax"])
+), crs = st_crs(range_proj))
+
+clip_box <- st_as_sfc(clip_bb)
+range_proj <- st_intersection(range_proj, clip_box) %>% st_make_valid() %>% st_union()
+
+# ----------------------------
+# Concave hull around samples (projected)
+# ----------------------------
+hull_proj <- st_concave_hull(st_union(coords_sf), ratio = 0.25, allow_holes = FALSE) %>%
+  st_make_valid()
+
+# ----------------------------
+# Combine range + hull, then buffer slightly (50 km)
+# ----------------------------
+combined <- st_union(range_proj, hull_proj) %>%
+  st_make_valid() %>%
+  st_union()
+
+combined <- st_buffer(combined, 50000) %>%  # 50 km
+  st_make_valid()
+
+# ----------------------------
+# Force to a SINGLE polygon (largest piece)
+# ----------------------------
+parts <- st_collection_extract(combined, "POLYGON")
+if (length(parts) > 1) {
+  parts <- st_cast(parts, "POLYGON", warn = FALSE)
+}
+combined_poly <- parts[which.max(st_area(parts))]
+
+# ----------------------------
+# Simplify to prevent millions of vertices (critical!)
+# Tune dTolerance: start 10–25 km.
+# ----------------------------
+combined_poly <- st_simplify(combined_poly, dTolerance = 20000, preserveTopology = TRUE) %>%
+  st_make_valid()
+
+# Optional: segmentize after simplify (keeps shape but caps segment length)
+# combined_poly <- st_segmentize(combined_poly, dfMaxLength = 25000)
+
+# Quick sanity checks
+print(st_geometry_type(combined_poly))
+cat("Outer vertex count:", nrow(st_coordinates(combined_poly)), "\n")
+```
+# feems python script adjusted
+So this is an adjusted version of the one that is found here https://github.com/NovembreLab/feems?tab=readme-ov-file. ChatGPT tidied it up and made it compatible with my inputs above.
+
+```{python}
+#!/usr/bin/env python3
+"""
+Run FEEMS + FEEMSmix from local inputs (all files in one directory).
+
+Expected inputs in --workdir (defaults to current directory):
+  - <plink_prefix>.bed/.bim/.fam
+  - coords.txt  (2 cols, no header; must match .fam order)
+  - outer.txt   (2 cols, polygon boundary coords in same CRS as coords/grid)
+  - grid.shp    (grid shapefile in same CRS)
+
+Outputs go to --outdir.
+"""
+
+import os
+import sys
+import argparse
+import json
+import numpy as np
+import pandas as pd
+
+# Headless plotting for clusters
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+from pandas_plink import read_plink
+from sklearn.impute import SimpleImputer
+
+from feems.utils import prepare_graph_inputs
+from feems.spatial_graph import SpatialGraph
+from feems.objective import Objective
+from feems.viz import Viz
+
+# FEEMSmix plotting helpers (these exist in recent feems versions)
+try:
+    from feems.plotting import draw_FEEMSmix_surface, plot_FEEMSmix_summary
+    HAS_FEEMSMIX_PLOTTING = True
+except Exception:
+    HAS_FEEMSMIX_PLOTTING = False
+
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Run FEEMS + FEEMSmix from PLINK + coords/outer/grid inputs."
+    )
+
+    p.add_argument("--workdir", default=".", help="Directory containing inputs (default: .)")
+    p.add_argument("--plink_prefix", required=True,
+                   help="PLINK prefix (no .bed extension), e.g. BANS.all.recode")
+    p.add_argument("--coords", default="coords.txt", help="Coords file name (default: coords.txt)")
+    p.add_argument("--outer", default="outer.txt", help="Outer boundary file name (default: outer.txt)")
+    p.add_argument("--grid", default="grid.shp", help="Grid shapefile name (default: grid.shp)")
+    p.add_argument("--outdir", default="feems_out", help="Output directory (default: feems_out)")
+
+    # Baseline FEEMS params
+    p.add_argument("--lamb", type=float, default=2.0, help="FEEMS lambda (default: 2.0)")
+    p.add_argument("--lamb_q", type=float, default=10.0, help="FEEMS lambda_q (default: 10.0)")
+    p.add_argument("--optimize_q", default="n-dim", choices=["n-dim", "1-dim", "none"],
+                   help="How to optimize q (default: n-dim)")
+
+    # Outlier + FEEMSmix params
+    p.add_argument("--outlier_frac", type=float, default=0.01,
+                   help="Fraction of pairs flagged as outliers (default: 0.01)")
+    p.add_argument("--nedges", type=int, default=3,
+                   help="Number of long-range edges to fit (default: 3)")
+    p.add_argument("--top", type=int, default=5,
+                   help="How many candidate sources to evaluate/report (default: 5)")
+    p.add_argument("--exclude_boundary", action="store_true",
+                   help="Exclude boundary demes when fitting LREs")
+
+    # Grid prep options
+    p.add_argument("--translated", action="store_true",
+                   help="Use translated coordinates in prepare_graph_inputs (default: False)")
+    p.add_argument("--buffer", type=float, default=0.0,
+                   help="Buffer for graph input prep (default: 0.0)")
+
+    return p.parse_args()
+
+
+def ensure_exists(path, kind="file"):
+    if kind == "file" and not os.path.isfile(path):
+        raise FileNotFoundError(f"Missing file: {path}")
+    if kind == "dir" and not os.path.isdir(path):
+        raise FileNotFoundError(f"Missing directory: {path}")
+
+
+def main():
+    args = parse_args()
+
+    workdir = os.path.abspath(args.workdir)
+    outdir = os.path.abspath(os.path.join(workdir, args.outdir))
+    os.makedirs(outdir, exist_ok=True)
+
+    plink_prefix = os.path.join(workdir, args.plink_prefix)
+    coords_path = os.path.join(workdir, args.coords)
+    outer_path = os.path.join(workdir, args.outer)
+    grid_path = os.path.join(workdir, args.grid)
+
+    # Sanity: expected PLINK files exist
+    ensure_exists(plink_prefix + ".bed")
+    ensure_exists(plink_prefix + ".bim")
+    ensure_exists(plink_prefix + ".fam")
+    ensure_exists(coords_path)
+    ensure_exists(outer_path)
+    ensure_exists(grid_path)
+
+    # Save run config
+    with open(os.path.join(outdir, "run_config.json"), "w") as f:
+        json.dump(vars(args), f, indent=2)
+
+    # --- Load PLINK ---
+    print(f"[INFO] Reading PLINK: {plink_prefix}")
+    bim, fam, G = read_plink(plink_prefix)
+
+    # G comes as (variants x samples) or (samples x variants) depending on version;
+    # pandas-plink returns a dask array with shape (n_variants, n_samples).
+    # We want genotypes as (n_samples, n_snps).
+    G = G.compute()  # numpy array
+    if G.shape[0] == fam.shape[0]:
+        genotypes = G
+    else:
+        genotypes = G.T
+
+    n_samples, n_snps = genotypes.shape
+    print(f"[INFO] Genotype matrix: {n_samples} samples x {n_snps} SNPs")
+
+    # --- Load coords/outer ---
+    coord = np.loadtxt(coords_path)
+    outer = np.loadtxt(outer_path)
+
+    if coord.shape[0] != n_samples or coord.shape[1] != 2:
+        raise ValueError(
+            f"coords shape {coord.shape} does not match expected ({n_samples}, 2). "
+            f"Ensure coords rows are in the same order as {args.plink_prefix}.fam"
+        )
+    if outer.shape[1] != 2:
+        raise ValueError(f"outer should have 2 columns (x y). Got shape: {outer.shape}")
+
+    # --- Mean impute missing genotypes ---
+    # feems examples do mean imputation; this is standard for their workflow.
+    print("[INFO] Mean-imputing missing genotypes (if any)")
+    imputer = SimpleImputer(missing_values=np.nan, strategy="mean")
+    genotypes = imputer.fit_transform(genotypes)
+    
+    # --- Remove invariant SNPs (monomorphic) ---
+    # FEEMS requires polymorphic SNPs.
+    colsum = genotypes.sum(axis=0)
+    n = genotypes.shape[0]
+
+    # Invariant all-0 or all-2 (assuming diploid additive coding 0/1/2)
+    invariant = (colsum == 0) | (colsum == 2 * n)
+
+    n_invar = int(invariant.sum())
+    if n_invar > 0:
+        print(f"[WARN] Removing {n_invar} invariant SNPs before FEEMS.")
+        genotypes = genotypes[:, ~invariant]
+        print(f"[INFO] Genotypes after filtering: {genotypes.shape[0]} samples x {genotypes.shape[1]} SNPs")
+    else:
+        print("[INFO] No invariant SNPs detected.")
+
+    # --- Prepare graph inputs (grid/edges) ---
+    print("[INFO] Preparing graph inputs (edges/grid)")
+    outer2, edges, grid, _ = prepare_graph_inputs(
+        coord=coord,
+        ggrid=grid_path,
+        translated=args.translated,
+        buffer=args.buffer,
+        outer=outer
+    )
+
+    import geopandas as gpd
+    from shapely.geometry import Point
+    from collections import deque
+
+    # grid returned by prepare_graph_inputs is a GeoDataFrame-like object in feems 1.0.0
+    # but to be safe, read your grid shapefile here (same indexing as the file).
+    ggrid = gpd.read_file(grid_path).reset_index(drop=True)
+    
+    # Build sample points GeoDataFrame in the SAME CRS as the grid
+    # IMPORTANT: your coord file must already be in this CRS (projected meters).
+    pts = gpd.GeoDataFrame(
+        {"i": np.arange(coord.shape[0])},
+        geometry=[Point(xy) for xy in coord],
+        crs=ggrid.crs
+    )
+
+    # Assign each sample to a grid cell (deme)
+    # predicate name depends on geopandas version: try "within" then fallback to "intersects"
+    try:
+        joined = gpd.sjoin(pts, ggrid, how="left", predicate="within")
+    except TypeError:
+        joined = gpd.sjoin(pts, ggrid, how="left", op="within")  # older geopandas
+    
+    if joined["index_right"].isna().any():
+        n_out = int(joined["index_right"].isna().sum())
+        raise RuntimeError(
+            f"{n_out} samples did not fall inside any grid cell. "
+            "This will break FEEMS. Check CRS match between coords.txt and grid.shp."
+        )
+
+    occupied = np.zeros(len(ggrid), dtype=bool)
+    occupied[joined["index_right"].astype(int).values] = True
+
+    print(f"[INFO] Occupied grid cells (have >=1 sample): {occupied.sum()} / {len(ggrid)}")
+
+    # Build adjacency from edges (edges are indices into the feems 'grid' object)
+    # We need edges to correspond to ggrid indexing; safest is to ensure prepare_graph_inputs used the same grid file.
+    edges_arr = np.asarray(edges, dtype=int)
+    adj = [[] for _ in range(len(ggrid))]
+    for a, b in edges_arr:
+        adj[a].append(b)
+        adj[b].append(a)
+
+    # BFS starting from all occupied nodes to keep only nodes connected to data
+    keep = np.zeros(len(ggrid), dtype=bool)
+    q = deque(np.where(occupied)[0].tolist())
+    for s in list(q):
+        keep[s] = True
+
+    while q:
+        u = q.popleft()
+        for v in adj[u]:
+            if not keep[v]:
+                keep[v] = True
+                q.append(v)
+
+    print(f"[INFO] Nodes reachable from data: {keep.sum()} / {len(ggrid)}")
+    
+    # Filter grid and edges to kept nodes, and reindex
+    old_to_new = -np.ones(len(ggrid), dtype=int)
+    old_to_new[np.where(keep)[0]] = np.arange(int(keep.sum()))
+    
+    edges_f = edges_arr[keep[edges_arr[:, 0]] & keep[edges_arr[:, 1]]]
+    edges_f = np.column_stack([old_to_new[edges_f[:, 0]], old_to_new[edges_f[:, 1]]])
+    
+    grid = ggrid.loc[keep].reset_index(drop=True)
+    edges = edges_f
+
+    print(f"[INFO] After pruning: grid nodes={len(grid)}, edges={len(edges)}")
+
+    # --- Build spatial graph ---
+    print("[INFO] Building SpatialGraph")
+    sp_graph = SpatialGraph(genotypes, coord, grid, edges, scale_snps=True)
+
+    # --- Fit baseline FEEMS ---
+    print(f"[INFO] Fitting baseline FEEMS: lamb={args.lamb}, lamb_q={args.lamb_q}, optimize_q={args.optimize_q}")
+    if args.optimize_q == "none":
+        sp_graph.fit(lamb=args.lamb, lamb_q=args.lamb_q, optimize_q=None)
+    else:
+        sp_graph.fit(lamb=args.lamb, lamb_q=args.lamb_q, optimize_q=args.optimize_q)
+
+    # --- Baseline diagnostics: fitted vs empirical distances ---
+    print("[INFO] Computing baseline diagnostics")
+    obj = Objective(sp_graph)
+    q = obj.q
+    m = obj.m
+
+    # Get matrices
+    Sigma_fit, Sigma_emp, _, _ = comp_mats(obj)
+    D_fit = cov_to_dist(Sigma_fit)
+    D_emp = cov_to_dist(Sigma_emp)
+
+    # Flatten upper triangle for scatter
+    iu = np.triu_indices_from(D_emp, k=1)
+    x = D_emp[iu]
+    y = D_fit[iu]
+
+    # Save R^2 for record (simple correlation^2)
+    corr = np.corrcoef(x, y)[0, 1]
+    r2 = float(corr ** 2)
+
+    diag = {
+        "n_samples": int(n_samples),
+        "n_snps": int(n_snps),
+        "baseline_lamb": args.lamb,
+        "baseline_lamb_q": args.lamb_q,
+        "baseline_r2_fit_vs_emp": r2,
+    }
+    with open(os.path.join(outdir, "baseline_diagnostics.json"), "w") as f:
+        json.dump(diag, f, indent=2)
+
+    plt.figure()
+    plt.scatter(x, y, s=4)
+    plt.xlabel("Empirical genetic distance")
+    plt.ylabel("Fitted genetic distance")
+    plt.title(f"Baseline FEEMS: fitted vs empirical (R² ~ {r2:.3f})")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "baseline_fit_vs_emp.png"), dpi=300)
+    plt.close()
+
+    # --- Baseline maps ---
+    print("[INFO] Writing baseline maps")
+    v = Viz(sp_graph, coord, grid, edges, outer2)
+
+    # 1) Migration surface
+    plt.figure(figsize=(8, 6))
+    v.draw_map()
+    v.draw_edges(use_weights=True)
+    plt.title("FEEMS migration surface (edge weights)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "baseline_migration_surface.png"), dpi=300)
+    plt.close()
+
+    # 2) Heterozygosity (node-specific q)
+    plt.figure(figsize=(8, 6))
+    v.draw_map()
+    v.draw_obs_nodes(node_values=q)
+    plt.title("FEEMS node values (q)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "baseline_q_nodes.png"), dpi=300)
+    plt.close()
+
+    # --- Outliers ---
+    print(f"[INFO] Extracting outliers (fraction_of_pairs={args.outlier_frac})")
+    outliers_df = sp_graph.extract_outliers(fraction_of_pairs=args.outlier_frac)
+    outliers_path = os.path.join(outdir, "outliers.tsv")
+    outliers_df.to_csv(outliers_path, sep="\t", index=False)
+
+    # --- FEEMSmix: independent fit (adds long-range edges) ---
+    # Reset any previous long-range edges (safe / explicit)
+    sp_graph.edge = []
+    sp_graph.c = []
+
+    print(f"[INFO] Re-fitting baseline before FEEMSmix independent_fit")
+    if args.optimize_q == "none":
+        sp_graph.fit(lamb=args.lamb, lamb_q=args.lamb_q, optimize_q=None)
+    else:
+        sp_graph.fit(lamb=args.lamb, lamb_q=args.lamb_q, optimize_q=args.optimize_q)
+
+    print(f"[INFO] Running FEEMSmix independent_fit: nedges={args.nedges}, top={args.top}")
+    ind_results = sp_graph.independent_fit(
+        outliers_df,
+        lamb=args.lamb,
+        lamb_q=max(1.0, args.lamb_q / 10.0),  # mild default; tweak if you like
+        optimize_q=None if args.optimize_q == "none" else args.optimize_q,
+        nedges=args.nedges,
+        top=args.top,
+        exclude_boundary=args.exclude_boundary,
+    )
+
+    # Save a light summary
+    # (ind_results is a complex object; keep a simple JSON summary when possible)
+    summary = {}
+    for k in ["best_nedges", "best_sources", "best_ll", "best_aic", "best_bic"]:
+        if hasattr(ind_results, k):
+            try:
+                summary[k] = getattr(ind_results, k)
+            except Exception:
+                pass
+    with open(os.path.join(outdir, "feemsmix_summary.json"), "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+
+    # FEEMSmix plots (if plotting helpers available)
+    if HAS_FEEMSMIX_PLOTTING:
+        print("[INFO] Writing FEEMSmix plots")
+        fig = draw_FEEMSmix_surface(v, ind_results, figsize=(8, 12))
+        fig.savefig(os.path.join(outdir, "feemsmix_surface.png"), dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        fig2 = plot_FEEMSmix_summary(ind_results, sequential=False)
+        fig2.savefig(os.path.join(outdir, "feemsmix_summary.png"), dpi=300, bbox_inches="tight")
+        plt.close(fig2)
+    else:
+        print("[WARN] FEEMSmix plotting helpers not available in this feems install; skipping FEEMSmix plots.")
+
+    print(f"[DONE] Outputs written to: {outdir}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        raise
+
+```
+
+# feems as a slurm job
+```{bash}
+#!/bin/bash
+#
+#SBATCH --job-name=feems
+#SBATCH --output=feems.%j.out
+#SBATCH --error=feems.%j.err
+#SBATCH -t 8:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 11
+#SBATCH --mem=40G
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+set -x
+source ~/.bashrc
+
+conda activate feems
+
+python run_feems.py \
+  --workdir /scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc \
+  --plink_prefix BANS.all.recode \
+  --coords BANS.coords.txt \
+  --outer BANS_breeding_outer.txt \
+  --grid BANS_breeding_grid_75km.shp \
+  --outdir feems_run1 \
+  --lamb 2.0 \
+  --lamb_q 10.0 \
+  --outlier_frac 0.01 \
+  --nedges 3 \
+  --top 5
+```

@@ -1,0 +1,502 @@
+---
+title: "02.5.overall_popstruc"
+output: html_document
+---
+#libraries
+```{r}
+library(tidyverse)
+library(data.table)
+```
+
+# pruning
+```{bash}
+#GIVING SNP IDS
+vcf="/scratch/alpine/ericacnr@colostate.edu/BANS/02.imputation/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.vcf.gz"
+
+conda activate GWAS2
+plink --vcf $vcf --aec --recode --out BANS.all.recode
+
+cat BANS.all.recode.map | awk -F"\t" '{split($1, a, "__"); print $1"\t"a[1]"."$4"\t"$3"\t"$4}' > BANS.all.recode_loc.map
+
+plink --ped BANS.all.recode.ped \
+--map BANS.all.recode_loc.map \
+--make-bed --aec \
+--out BANS.all.recode
+
+bfile="BANS.all.recode"
+
+plink --bfile $bfile --aec \
+--indep-pairwise 25 10 0.5 --out PC1_allindv
+#278091 of 3123808 variants removed.
+
+plink --bfile $bfile --aec --extract PC1_allindv.prune.in \
+  --make-bed --out pruned_allindv
+#2845717 variants and 209 people pass filters and QC.
+
+plink --bfile pruned_allindv --aec --allow-no-sex --pca 208 \
+  --out PC1_allindv.ld25-10-0.5
+#2845717 variants and 209 people pass filters and QC.
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/PC1_allindv.ld25-10-0.5*eigen* /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.neutral_pop_struc/
+```
+# Time to plot the PCA.
+## grouping pops
+The actual group pops is missing indv that I filtered for missingness, so this is a quick temporary one...
+```{r}
+library(rnaturalearth)
+library(geosphere)
+
+meta <- read.csv("../../data/BANS_all_sample_data.csv")
+coords <- meta %>% dplyr::select(Long, Lat)
+dist_matrix <- distm(as.matrix(coords), fun = distHaversine)
+
+libraries <- read.delim("snakemake/config_files/BANS.Plate1.2.3.units.tsv") %>% rename(BGP_ID=sample)
+
+lib.meta <- left_join(meta, libraries %>% dplyr::select(library, BGP_ID), by="BGP_ID")
+
+# clustering
+hclust_groups <- hclust(as.dist(dist_matrix), method = "complete") # complete method here avoids chaining, ensuring all samples in a cluster are within the specified distance of each other. If you want some flexibility you could try "average"
+
+# cut tree at 111.111 km to assign spatial clusters
+meta$GroupID <- cutree(hclust_groups, h = 111111)
+
+# create population labels and filter for minimum cluster size
+meta.sub <- meta %>%
+  mutate(Pop = paste0("Cluster_", GroupID)) %>%
+  group_by(Pop) %>%
+  filter(n() > 3) %>%  # keep clusters with ≥4 individuals
+  ungroup()
+
+pops <- data.frame(BGP_ID = meta.sub$BGP_ID, Group = meta.sub$Pop)
+
+library(rnaturalearth)
+library(raster)
+library(terra)
+map <- ne_states(country = c("United States of America", "Canada", "Mexico"), 
+                 returnclass = 'sf')
+
+# create colors for clusters
+n_clusters <- length(unique(meta.sub$Pop))
+cluster_colors <- rainbow(n_clusters)
+names(cluster_colors) <- unique(meta.sub$Pop)
+
+meta.b <- meta.sub %>%
+  group_by(Pop) %>%
+  mutate(cluster_size = n()) %>%
+  ungroup()
+
+# plot it
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_point(data = meta.b, aes(x = Long, y = Lat, color = Pop),
+             size = 1.5, position = position_jitter(width = 0.1, height = 0.1)) +
+  geom_text(data = meta.b,
+            aes(x = Long, y = Lat, label = Pop),
+            size = 2, vjust = -0.6) +
+  scale_colour_manual(values = cluster_colors, name = "Spatial Clusters", guide = "none") +
+  coord_sf(xlim = c(-145, -55), ylim = c(15, 80)) + 
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+p
+ggsave("cluster_plot.png")
+```
+
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+plink_pca <- read.table("PC1_allindv.ld25-10-0.5.eigenvec", header = FALSE) %>% dplyr::select(-V2)
+eigenval <- scan("PC1_allindv.ld25-10-0.5.eigenval")
+
+pve05 <- data.frame(PC = 1:208, pve = eigenval/sum(eigenval)*100)
+
+# set names
+pca05 <- plink_pca
+colnames(pca05)[-1] <- paste0("PC", 1:(ncol(pca05) - 1))
+names(pca05)[1] <- "ind"
+nrow(pca05)
+#correct number of samples
+
+pops
+
+# Join PCA data
+pca.cluster <- left_join(pca05, pops %>% rename(ind=BGP_ID), by="ind")  # left_join PCA first to preserve PC columns
+
+# Factor for cluster order
+region_order <- c(
+  "Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20",
+  "Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19",
+  "Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7"
+)
+pca.cluster$Cluster <- factor(pca.cluster$Group, levels = region_order)
+
+# # Define clusters by region
+# West_clusters    <- c("Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20")
+# Central_clusters <- c("Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19")
+# East_clusters    <- c("Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7")
+# 
+# # Assign colors by cluster
+# library(RColorBrewer)
+# W.cols <- setNames(brewer.pal(n = length(West_clusters), "Reds"), West_clusters)
+# C.cols <- setNames(brewer.pal(n = length(Central_clusters), "Blues"), Central_clusters)
+# E.cols <- setNames(brewer.pal(n = length(East_clusters), "Greens"), East_clusters)
+# bg <- c(W.cols, C.cols, E.cols)
+# saveRDS(bg, file = "bg_colors.rds")
+bg <- readRDS("bg_colors.rds")
+
+# Plot
+b05 <- ggplot(pca.cluster, aes(PC1, PC2, col = Cluster)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+b05
+ggsave("BANS_all_overall_PCA.png", width=8)
+```
+
+```{r}
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_point(data = meta.b, aes(x = Long, y = Lat, color = Pop),
+             size = 1.5, position = position_jitter(width = 0.1, height = 0.1)) +
+  geom_text(data = meta.b,
+            aes(x = Long, y = Lat, label = Pop),
+            size = 2, vjust = -0.6) +
+  scale_colour_manual(values = bg, name = "Spatial Clusters", guide = "none") +
+  coord_sf(xlim = c(-145, -55), ylim = c(15, 80)) + 
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+p
+ggsave("cluster_all_plot.png")
+```
+
+### no related indv
+Using KING relatedness matrix in plink version 2 (note: not the same version as in the GWAS2 environment!)
+
+"First-degree relations (parent-child, full siblings) correspond to ~0.25, second-degree relations correspond to ~0.125, etc. It is conventional to use a cutoff of ~0.354 (the geometric mean of 0.5 and 0.25) to screen for monozygotic twins and duplicate samples, ~0.177 to add first-degree relations, etc."
+
+```{bash}
+conda activate plink2
+plink2 --bfile pruned_allindv \
+      --make-king-table \
+      --out bans.unrelated
+      
+      
+```
+
+```{bash}
+awk 'NR>1 {print $8}' bans.unrelated.kin0 | sort -n | tail
+-0.379187
+-0.377382
+-0.357026
+-0.342493
+-0.213987
+
+awk 'NR>1 {print $8}' bans.unrelated.kin0 | sort -n | head
+-3.94258
+-3.9218
+-3.90581
+-3.89735
+-3.89208
+```
+
+So, having super negative values, I think, it's good. The unrelated ones should be close to 0, no so far below it. I think that this might be due to the high levels of admixture...
+
+```{bash}
+awk 'NR>1 && $8>0 {c++} END{print "positive kinship pairs:",c}' bans.unrelated.kin0
+```
+This had no output. Which is... unexpected considering the patterning in the PCA.
+
+But, if we manually remove those individuals, it does improve the whole thing a lot. Which is weird because that, usually, means they're related (which stretches the whole thing artificially).
+```{r}
+library(plotly)
+
+rel <- ggplot(pca.cluster, aes(
+    x = PC1, 
+    y = PC2, 
+    col = Group,
+    text = paste0(
+        "ID: ", ind, "<br>",
+        "Group: ", Group, "<br>",
+        "PC1: ", round(PC1, 4), "<br>",
+        "PC2: ", round(PC2, 4)
+    )
+)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+rel
+ggplotly(rel)
+```
+
+Double checking for those top two pink dots:
+awk '($2=="25N03069" && $4=="25N03072") || ($2=="25N03072" && $4=="25N03069")' \
+>   bans.unrelated.kin0
+25N03072	25N03072	25N03069	25N03069	2845717	0.04145	0.0669181	*-0.379187*
+
+Removing 7 individuals:
+
+```{r}
+region_order <- c(
+  "Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20",
+  "Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19",
+  "Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7"
+)
+pca.cluster$Cluster <- factor(pca.cluster$Group, levels = region_order)
+
+# Define clusters by region
+West_clusters    <- c("Cluster_1", "Cluster_5", "Cluster_16", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_2", "Cluster_20")
+Central_clusters <- c("Cluster_3", "Cluster_8", "Cluster_17", "Cluster_21", "Cluster_18", "Cluster_19")
+East_clusters    <- c("Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7")
+
+# Assign colors by cluster
+library(RColorBrewer)
+W.cols <- setNames(brewer.pal(n = length(West_clusters), "Reds"), West_clusters)
+C.cols <- setNames(brewer.pal(n = length(Central_clusters), "Blues"), Central_clusters)
+E.cols <- setNames(brewer.pal(n = length(East_clusters), "Greens"), East_clusters)
+bg <- c(W.cols, C.cols, E.cols)
+
+pca.cluster.norel <- pca.cluster %>% filter(!ind %in% c("25N17424", "25N17421", "25N17432", "25N03069", "25N03072", "25N03076", "25N19612", "25N03078", "25N03068", "25N03074", "25N03070"))
+nrow(pca.cluster.norel)
+rel.nr <- ggplot(pca.cluster.norel, aes(
+    x = PC1, 
+    y = PC2, 
+    col = Group,
+    text = paste0(
+        "ID: ", ind, "<br>",
+        "Group: ", Group, "<br>",
+        "PC1: ", round(PC1, 4), "<br>",
+        "PC2: ", round(PC2, 4)
+    )
+)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+rel.nr
+
+ggsave("BANS_overall_norel_PCA.png")
+```
+Changing the cluster colors to make more sense...
+
+```{r}
+N_clusters    <- c("Cluster_1", "Cluster_5", "Cluster_4", "Cluster_9", "Cluster_12", "Cluster_3", "Cluster_17", "Cluster_8", "Cluster_16")
+S_clusters <- c("Cluster_2", "Cluster_20", "Cluster_18", "Cluster_19", "Cluster_21")
+E_clusters    <- c("Cluster_6", "Cluster_14", "Cluster_11", "Cluster_10", "Cluster_13", "Cluster_15", "Cluster_7")
+
+# Assign colors by cluster
+library(RColorBrewer)
+N.cols <- setNames(brewer.pal(n = length(N_clusters), "Reds"), N_clusters)
+S.cols <- setNames(brewer.pal(n = length(S_clusters), "Blues"), S_clusters)
+E.cols <- setNames(brewer.pal(n = length(E_clusters), "Greens"), E_clusters)
+bg <- c(N.cols, S.cols, E.cols)
+
+rel.nr <- ggplot(pca.cluster.norel, aes(
+    x = PC1, 
+    y = PC2, 
+    col = Group,
+    text = paste0(
+        "ID: ", ind, "<br>",
+        "Group: ", Group, "<br>",
+        "PC1: ", round(PC1, 4), "<br>",
+        "PC2: ", round(PC2, 4)
+    )
+)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = bg) +
+  theme_light() +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+rel.nr
+
+ggsave("BANS_overall_norel_PCA.png")
+```
+
+```{r}
+library(ggrepel)
+
+meta.b.unique <- meta.b %>%
+  group_by(Pop) %>%
+  slice(1) %>%
+  ungroup()
+
+meta.b.unique$Pop <- factor(meta.b.unique$Pop, levels = region_order)
+
+breeding.sf <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>% filter(season=="breeding")
+
+meta.b.unique <- meta.b.unique %>%
+  mutate(PlateShape = case_when(
+    Lib.Plate.Name %in% c("BANS WGLC Plate A", "BANS WGLC Plate B") ~ "Original Samples",
+    Lib.Plate.Name == "BANS WGS 003" ~ "New Samples",
+    TRUE ~ "Other"
+  ))
+meta.b.unique$PlateShape <- factor(
+  meta.b.unique$PlateShape,
+  levels = c("Original Samples", "New Samples", "Other")
+)
+
+p <- ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.1) +
+  geom_sf(data=breeding.sf, fill="lightgrey", alpha=.4)+
+  
+  # Points (colored by Pop)
+  geom_point(
+    data = meta.b.unique,
+    aes(x = Long, y = Lat, color = Pop, shape = PlateShape),
+    size = 2.5
+  ) +
+
+  # Labels (label is CityTown, color not mapped)
+  geom_text_repel(
+    data = meta.b.unique,
+    aes(x = Long, y = Lat, label = CityTown),
+    size = 1.5,
+    fontface = "bold",
+    box.padding = 0.3,
+    point.padding = 0.2,
+    segment.size = 0.3,
+    segment.color = "black",
+    max.overlaps = Inf,
+    min.segment.length = .1
+  ) +
+  scale_shape_manual(
+    values = c(
+      "Original Samples" = 16,     # filled circle
+      "New Samples" = 17,   # filled triangle
+      "Other" = 15       # optional fallback (square)
+    ),
+    name = "Library Plate"
+  ) +
+  
+  scale_colour_manual(values = bg, name = "Spatial Clusters") +
+  coord_sf(xlim = c(-165, -55), ylim = c(15, 80)) +
+  theme_minimal() +
+  labs(title = "All clusters with ≥4 individuals",
+       x = "Longitude",
+       y = "Latitude")
+
+p
+ggsave("cluster_newcol_plot.png")
+```
+# ADMIXTURE
+ADMIXTURE does not accept chromosome names that are not human chromosomes. We will thus just exchange the first column by 0
+
+```{bash}
+awk '{$1="0";print $0}' pruned_allindv.bim > pruned_allindv.bim.tmp
+mv pruned_allindv.bim.tmp pruned_allindv.bim
+```
+
+Running admixture with k=1-3
+
+```{bash, label="bash"}
+#!/bin/bash
+#
+#SBATCH --job-name=admix
+#SBATCH --output=admix.%j.out
+#SBATCH --error=admix.%j.err
+#################
+#SBATCH -t 2:00:00
+#SBATCH -p amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 5
+#SBATCH --mem=12G
+#################
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=ericacnr@colostate.edu
+##################
+#echo commands to stdout
+
+source ~/.bashrc
+
+conda activate GWAS2
+admixture --cv pruned_allindv.bed 1 > pruned_allindv.log1.out
+
+admixture --cv pruned_allindv.bed 2 > pruned_allindv.log2.out
+
+admixture --cv pruned_allindv.bed 3 > pruned_allindv.log3.out
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/*.Q /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs
+```
+
+To identify the best value of k clusters which is the value with lowest cross-validation error, we need to collect the cv errors. 
+
+```{bash}
+awk '/CV/ {print $3,$4}' *out | cut -c 4,7-20 > BANS.cv.error
+```
+1 0.51779
+2 0.52750
+3 0.53584
+
+So, this is suggesting that there isn't a strong signal of population structure an k=1 is the best supported. This is reasonable considering the strong IBD signal. So, let's plot the admix but also do some feems to see if there are strong barrier to migration present that might help us delineate stuff.
+
+```{r}
+samplelist <- pca05$ind
+
+all_data <- tibble(sample=character(),
+                   k=numeric(),
+                   Q=character(),
+                   value=numeric())
+
+for (k in 1:3){
+    data <- read_delim(paste0("pruned_allindv.",k,".Q"),
+                       col_names = paste0("Q",seq(1:k)),
+                       delim=" ")
+    data$sample <- samplelist
+    data$k <- k
+    
+    #This step converts from wide to long.
+    data %>% gather(Q, value, -sample,-k) -> data
+    all_data <- rbind(all_data,data)
+}
+
+head(all_data)
+
+ADMIX_plot <- all_data %>%
+  filter(k %in% 1:3) %>%
+  ggplot(aes(x = sample, y = value, fill = factor(Q))) +
+  geom_bar(stat = "identity", width = 1) +
+  facet_wrap(~ k, ncol = 1, scales = "free_y") +
+  xlab("Sample") +
+  ylab("Ancestry proportion") +
+  scale_fill_brewer(palette = "Set1", name = "Cluster") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1),
+    panel.spacing = unit(0.3, "lines")
+  )
+ggsave("BANS_ADMIX.png",width = 10)
+ADMIX_plot
+```
+
+
+
+```{r}
+all_k <- all_data %>%
+  ggplot(aes(x = sample, y = value, fill = factor(Q))) + 
+  geom_bar(stat = "identity", position = "stack") +
+  xlab("Sample") + ylab("Ancestry") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 5)) +  # Adjust size here
+  scale_fill_brewer(palette = "Set1", name = "K", labels = seq(1:5)) +
+  facet_wrap(~k, ncol = 1)
+
+ggplotly(all_k)
+```

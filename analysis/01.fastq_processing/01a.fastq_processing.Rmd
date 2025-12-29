@@ -387,7 +387,7 @@ source ~/.bashrc
 
 conda activate snakemake-8.20.4
 
-snakemake -p --profile hpcc-profiles/slurm/alpine --configfile example-configs/LOSH-Apr-25/config.yaml --until make_gvcf_sections --rerun-incomplete
+snakemake -p --profile hpcc-profiles/slurm/alpine --configfile example-configs/LOSH-Apr-25/config.yaml --until concat_gvcf_sections --rerun-incomplete
 ```
 
 ## getting the other files over
@@ -429,14 +429,25 @@ I'm going to pop that maf0.05 one over into an informatively named vcf:
 #SBATCH --mail-type=END,FAIL
 #SBATCH  --mail-user=ericacnr@colostate.edu
 
-source ~/.bashrc
-conda activate bioinf
-bcftools view --threads 16 \
-  -Oz \
-  -o vcf_final/BANS.all.ds6x.pass-maf-0.05.vcf.gz \
-  bcf/pass-maf-0.05.bcf
+INPUT_FILE="bcf/all.bcf"
+OUT="vcf/BANS.all.ds6x.pass-maf-0.05.SNP.vcf.gz"
+
+#filter for PASS sites, MAF >= 0.05, and keep only biallelic SNPs, filter out sites with >20% missing data (F_MISSING > 0.2)
+bcftools view --threads 8 \
+    -i 'FILTER="PASS" & MAF>=0.05' \
+    -v snps -m2 -M2 "$INPUT_FILE" \
+| bcftools filter --threads 8 \
+    -e 'F_MISSING > 0.2' \
+    -Oz -o "$OUT"
+
+echo "Output file: $OUT"
   
-bcftools index --threads 16 vcf_final/BANS.all.ds6x.pass-maf-0.05.vcf.gz
+bcftools index --threads 16 vcf/BANS.all.ds6x.pass-maf-0.05.SNP.vcf.gz
+```
+
+```{bash}
+OUT="vcf/BANS.all.ds6x.pass-maf-0.05.SNP.vcf.gz"
+bcftools query -f '%CHROM\n' $OUT | uniq -c
 ```
 
 # Final Filtering
@@ -469,8 +480,8 @@ mkdir -p vcf/filtered_HC
 
 ##Location of fasta file and
 REFERENCE="/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/resources/genome.fasta"
-IN="vcf_final/BANS.all.ds6x.pass-maf-0.05.vcf.gz"
-OUT="vcf_final"
+IN="vcf/BANS.all.ds6x.pass-maf-0.05.SNP.vcf.gz"
+OUT="vcf/filtered_HC"
 
 conda activate gatk_4
 ###Select variants- SNPs
@@ -481,20 +492,23 @@ java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /c
      -R $REFERENCE \
      -V $IN \
      -select-type SNP \
-     --O $OUT/BANS.all.ds6x_gatk.SNP.vcf
-     
-conda activate bioinf
+     --O $OUT/BANS.all.ds6x.pass-maf-0.05.SNP.vcf
 
-###VCFtools for filtering
-vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.vcf --out $OUT/BANS.all.ds6x_gatk.SNP.05maf --min-alleles 2 --max-alleles 2 --max-missing 0.5 --maf 0.05 --recode --recode-INFO-all
-
-conda activate gatk_4
+#the lines before remove some of the annotations I need for later filtering
+java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g \
+  -jar /curc/sw/install/bio/gatk/4.3.0.0/gatk-package-4.3.0.0-local.jar VariantAnnotator \
+  -R $REFERENCE \
+  -V $OUT/BANS.all.ds6x.pass-maf-0.05.SNP.vcf \
+  -O $OUT/BANS.all.ds6x_gatk.pass-maf-0.05.SNP.annot.vcf.gz \
+  -A BaseQualityRankSumTest \
+  -A MappingQualityRankSumTest \
+  -A ReadPosRankSumTest
 
 ##GATK for hard filtering VWSR, Auwera et al 2013, with gatk4
 
 java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /curc/sw/install/bio/gatk/4.3.0.0/gatk-package-4.3.0.0-local.jar VariantFiltration \
 -R $REFERENCE \
--V $OUT/BANS.all.ds6x_gatk.SNP.05maf.recode.vcf \
+-V $OUT/BANS.all.ds6x_gatk.pass-maf-0.05.SNP.annot.vcf.gz \
 -filter "QUAL < 30.0" --filter-name "QUAL30" \
 -filter "SOR > 3.0" --filter-name "SOR3" \
 -filter "FS > 60.0" --filter-name "FS60" \
@@ -509,12 +523,12 @@ java -Djava.io.tmpdir=/scratch/alpine/ericacnr@colostate.edu/tmp -Xmx37g -jar /c
      -R $REFERENCE \
      -V $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.vcf \
      --exclude-filtered  true \
-     -O $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vc
+     -O $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf
 
 conda activate bioinf
 
-##VCFtools for filtering based on missingness, once you remove systematic errors. Play around with this to get the numbers you want and make sense
-vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --out $OUT/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf --max-missing 0.8 --recode --recode-INFO-all
+<!-- ##VCFtools for filtering based on missingness, once you remove systematic errors. Play around with this to get the numbers you want and make sense -->
+<!-- vcftools --vcf $OUT/BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --out $OUT/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf --max-missing 0.8 --recode --recode-INFO-all -->
 ```
 
 Yay! Head on over to vcf_eval to do some tests for batch effects and missingness stuff.
@@ -528,25 +542,25 @@ vcftools --vcf BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --missing-indv
 # filter out those individuals missing more than 30% of genome wide information
 <!-- After filtering, kept 229 out of 229 Individuals -->
 <!-- Outputting Individual Missingness -->
-<!-- After filtering, kept 9722479 out of a possible 9722479 Sites -->
+<!-- After filtering, kept 3124563 out of a possible 3124563 Sites -->
 
-#filt ind with higher than 50% overall missingness
-awk 'NR>1 && $5 > 0.5 {print $1}' out.imiss > bad_ind
+#filt ind with less than 30% overall missingness
+awk 'NR>1 && $5 > 0.3 {print $1}' out.imiss > bad_ind
 wc -l bad_ind
 
 # then filter SNP level missingness
-vcftools --vcf BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --remove bad_ind --out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss --max-missing 0.8 --recode --recode-INFO-all
+vcftools --vcf BANS.all.ds6x_gatk.SNP.05maf.VQSR2.PASS.vcf --remove bad_ind --out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss --max-missing 0.8 --recode --recode-INFO-all
 
-<!-- After filtering, kept 215 out of 229 Individuals -->
+<!-- After filtering, kept 209 out of 229 Individuals -->
 <!-- Outputting VCF file... -->
-<!-- After filtering, kept 4069269 out of a possible 9722479 Sites -->
+<!-- After filtering, kept 3124151 out of a possible 3124563 Sites -->
 
-vcftools --vcf BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss.recode.vcf --missing-indv
+vcftools --vcf BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf --missing-indv
 
-bcftools stats BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss.recode.vcf > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind0.3miss.0.8miss.recode.stats
+bcftools stats BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.stats
 
 awk 'NR>1 {sum += (1-$5)} END {print sum/NR}' out.imiss
-#0.850813
+#0.870299
 ```
 
-That is, in fact, what happened! 4069269 with this type of filtering. 215 samples left.
+That is, in fact, what happened! 3124151 with this type of filtering. 209 samples left.

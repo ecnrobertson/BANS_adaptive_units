@@ -1,0 +1,443 @@
+---
+title: "02.5.2.eems_overall"
+output: html_document
+---
+# libraries
+```{r}
+library(rnaturalearth)
+library(ggplot2)
+library(sf)
+library(terra)
+library(dplyr)
+library()
+```
+
+# installs
+installing feems into a conda environment called feems_py310
+```{bash}
+conda create -n feems_py310 python=3.10 -y
+conda activate feems_py310
+
+# Use conda-forge for compiled wheels consistently
+mamba install -c conda-forge numpy=1.23.* scipy pandas scikit-learn matplotlib statsmodels \
+  shapely pyproj fiona geopandas -y
+
+# Then install feems + pandas-plink
+pip install feems pandas-plink
+install -c bioconda feems -c conda-forge
+```
+
+# input files
+## PLINK files
+These have already been made for the population structure stuff, so I'm using those:
+/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/BANS.all.recode
+
+## coords file
+Need the sample order from the fam file
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/BANS.all.recode.fam /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs
+```
+
+```{r}
+fam <- read.table("BANS.all.recode.fam",
+  stringsAsFactors = FALSE
+)
+
+colnames(fam)[1:2] <- c("FID", "IID")
+
+meta <- read.csv("../../data/BANS_all_sample_data_shifted.csv") %>% select(BGP_ID, Long, Lat) %>% rename(IID=BGP_ID)
+
+coords_df <- left_join(fam, meta, by="IID")
+
+#project coordinates to better system
+coords_sf <- st_as_sf(
+  coords_df,
+  coords = c("Long", "Lat"),
+  crs = 4326
+)
+
+coords_proj <- st_transform(coords_sf, 5070)
+
+#get coords input file
+xy <- st_coordinates(coords_proj)
+
+write.table(
+  xy,
+  file = "BANS.coords.txt",
+  row.names = FALSE,
+  col.names = FALSE,
+  quote = FALSE
+)
+```
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs/BANS.coords.txt ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/
+```
+## boundary shape file
+```{r}
+#north america without political boundaries
+map <- ne_states(country = c("United States of America", "Canada"), 
+                 returnclass = 'sf')
+na_union <- st_union(map)
+
+#BANS breeding range
+breeding.sf <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>% filter(season=="breeding") %>% st_transform(crs(map))
+
+#clip BANS range to just NA and make a single, clean polygon
+breeding_na <- st_intersection(breeding.sf, na_union)
+breeding_na <- st_make_valid(breeding_na)
+
+breeding_outer <- st_union(breeding_na)
+
+#project to match the coords file
+breeding_outer_proj <- st_transform(breeding_outer, 5070)
+
+#get outer boundary
+outer_coords <- st_coordinates(breeding_outer_proj)[, 1:2]
+
+write.table(
+  outer_coords,
+  "BANS_breeding_outer.txt",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+#make grids within the polygon (I believe this is what gets filled in with migratory surface values)
+grid <- st_make_grid(
+  breeding_outer_proj,
+  cellsize = 75000,   # 75 km
+  square = TRUE
+)
+
+grid <- st_sf(geometry = grid)
+grid <- st_intersection(grid, breeding_outer_proj)
+
+st_write(grid, "BANS_breeding_grid_75km.shp", delete_dsn = TRUE)
+
+
+plot(st_geometry(na_union), col = "grey90")
+plot(st_geometry(breeding_na), col = "steelblue", add=T)
+```
+
+Problem: Feems wants a continuous surface, not the disjointed mess that is this birds breeding range. So, I need to simplify/blend this range...
+```{r}
+#north america without political boundaries
+map <- ne_states(country = c("United States of America", "Canada"), 
+                 returnclass = 'sf')
+na_union <- st_union(map)
+
+#BANS breeding range
+breeding.sf <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>% filter(season=="breeding") %>% st_transform(crs(map))
+
+breeding_outer <- st_union(breeding.sf)
+
+#project to match the coords file
+breeding_outer_proj <- st_transform(breeding_outer, 5070)
+
+# outer_poly <- st_union(st_buffer(breeding_outer_proj, 100000))
+# outer_poly <- st_make_valid(outer_poly)
+
+#############
+#remove texas
+st_bbox(breeding_outer_proj)
+
+clip_box <- st_as_sfc(st_bbox(c(
+  xmin = -4514069.6,
+  ymin = 321028.6 + 600000,  # move north ~300 km
+  xmax = 2798098.4,
+  ymax = 6133850.1
+), crs = st_crs(breeding_outer_proj)))
+
+rng_clipped <- st_intersection(breeding_outer_proj, clip_box)
+rng_clipped <- st_union(rng_clipped)
+
+#hull <- st_convex_hull(breeding_outer_proj)
+hull <- st_concave_hull(rng_clipped, allow_holes = F, ratio = 0.25)
+
+
+#############
+
+ggplot() +
+  geom_sf(data = breeding_outer_proj, fill = "red", color="red")+
+  geom_sf(data=hull, fill="yellow", alpha=0.5)
+```
+
+```{r}
+#get outer boundary
+outer_coords <- st_coordinates(hull)[, 1:2]
+
+write.table(
+  outer_coords,
+  "BANS_breeding_outer.txt",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+#make grids within the polygon (I believe this is what gets filled in with migratory surface values)
+cellsize_m <- 75000
+
+grid_sq <- st_make_grid(hull, cellsize = cellsize_m, square = TRUE) %>%
+  st_as_sf() %>%
+  st_set_crs(st_crs(hull))
+
+# Keep only squares whose centroid is inside the hull polygon
+grid_cent <- st_centroid(grid_sq)
+inside <- st_within(grid_cent, hull, sparse = FALSE)[,1]
+grid_sq <- grid_sq[inside, , drop = FALSE]
+
+# sanity check: ensure all are POLYGON (not MULTIPOLYGON)
+table(st_geometry_type(grid_sq))
+
+plot(st_geometry(grid_sq))
+
+st_write(grid_sq, "BANS_breeding_grid_75km.shp", delete_dsn = TRUE)
+```
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs/BANS_breeding_* ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/
+```
+# OLD---another method for input boundaries
+```{r}
+coords_sf <- st_as_sf(coords, coords = c("Long", "Lat"), crs = 5070) %>%
+  st_make_valid()
+# concave hull around coordinates
+hull <- st_concave_hull(coords_sf, allow_holes = F, ratio = 0.25)
+hull <- st_make_valid(hull)
+
+breeding.sf <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>% filter(season=="breeding") %>% st_transform(crs(map))
+
+# project and clean geometries
+range_proj <- st_transform(breeding.sf, 5070) %>% st_buffer(0)
+hull_proj  <- st_transform(hull, 5070) %>% st_buffer(0)
+
+#remove texas
+st_bbox(range_proj)
+
+clip_box <- st_as_sfc(st_bbox(c(
+  xmin = -4514069.6,
+  ymin = 321028.6 + 1500000,  # move north ~700 km
+  xmax = 2798098.4,
+  ymax = 6133850.1
+), crs = st_crs(range_proj)))
+
+rng_clipped <- st_intersection(range_proj, clip_box)
+range.hull <- st_concave_hull(rng_clipped, allow_holes = F, ratio = 0.25)
+
+# combine points poplygon and range map
+combined_proj <- st_union(range.hull, hull_proj) %>%
+  st_make_valid() %>%
+  st_union()
+
+# #buffer around new polygon
+# combined <- st_buffer(combined_proj, 50000) %>%  # 50 km
+#   st_make_valid()
+# 
+# parts <- st_collection_extract(combined, "POLYGON")
+# if (length(parts) > 1) {
+#   parts <- st_cast(parts, "POLYGON", warn = FALSE)
+# }
+# combined_poly <- parts[which.max(st_area(parts))]
+# 
+# combined_poly <- st_simplify(combined_poly, dTolerance = 30000, preserveTopology = TRUE) %>%
+#   st_make_valid()
+# 
+# # give crs
+combined_final <- st_transform(combined_proj, 5070)
+
+map <- ne_states(
+  country = c("United States of America", "Canada"),
+  returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = map, fill = "white", color = "black", size = 0.2) +
+  geom_sf(data = combined_final, fill = "grey70", color = "black", alpha = 0.5) +
+  geom_sf(data = coords_sf, color = "blue", size = 2)
+
+#get outer boundary
+outer_coords <- st_coordinates(combined_final)[, 1:2]
+
+write.table(
+  outer_coords,
+  "BANS_breeding_outer2.txt",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+#make grids within the polygon (I believe this is what gets filled in with migratory surface values)
+grid <- st_make_grid(
+  combined_final,
+  cellsize = 75000,   # 75 km
+  square = TRUE
+)
+
+grid <- st_sf(geometry = grid)
+grid <- st_intersection(grid, combined_final)
+
+plot(st_geometry(grid))
+
+st_write(grid, "BANS_breeding_grid_75km2.shp", delete_dsn = TRUE)
+```
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/02.5.delineate_ESUs/BANS_breeding_*2* ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/
+```
+
+## another method
+```{r}
+library(sf)
+library(dplyr)
+library(rnaturalearth)
+
+# ----------------------------
+# Inputs
+# ----------------------------
+coords_df <- coords  # must have Long/Lat columns (lon/lat)
+range_ll <- st_read("../../data/spatial_files/banswa_range_2023/banswa_range_2023.gpkg") %>%
+  filter(season == "breeding") %>%
+  st_make_valid()
+
+# If coords are lon/lat, this MUST be 4326 first:
+coords_sf_ll <- st_as_sf(coords_df, coords = c("Long", "Lat"), crs = 4326) %>%
+  st_make_valid()
+
+# Project everything to an equal-area CRS in meters (you chose 5070)
+coords_sf <- st_transform(coords_sf_ll, 5070)
+range_proj <- st_transform(range_ll, 5070) %>% st_make_valid() %>% st_union()
+
+# ----------------------------
+# (Optional) Clip out Texas-ish by moving ymin north.
+# Tune yshift_m until TX is excluded but everything else remains.
+# ----------------------------
+bb <- st_bbox(range_proj)
+yshift_m <- 250000  # 250 km north; adjust 150k–400k as needed
+
+clip_bb <- st_bbox(c(
+  xmin = as.numeric(bb["xmin"]),
+  ymin = as.numeric(bb["ymin"]) + yshift_m,
+  xmax = as.numeric(bb["xmax"]),
+  ymax = as.numeric(bb["ymax"])
+), crs = st_crs(range_proj))
+
+clip_box <- st_as_sfc(clip_bb)
+range_proj <- st_intersection(range_proj, clip_box) %>% st_make_valid() %>% st_union()
+
+# ----------------------------
+# Concave hull around samples (projected)
+# ----------------------------
+hull_proj <- st_concave_hull(st_union(coords_sf), ratio = 0.25, allow_holes = FALSE) %>%
+  st_make_valid()
+
+# ----------------------------
+# Combine range + hull, then buffer slightly (50 km)
+# ----------------------------
+combined <- st_union(range_proj, hull_proj) %>%
+  st_make_valid() %>%
+  st_union()
+
+combined <- st_buffer(combined, 50000) %>%  # 50 km
+  st_make_valid()
+
+# ----------------------------
+# Force to a SINGLE polygon (largest piece)
+# ----------------------------
+parts <- st_collection_extract(combined, "POLYGON")
+if (length(parts) > 1) {
+  parts <- st_cast(parts, "POLYGON", warn = FALSE)
+}
+combined_poly <- parts[which.max(st_area(parts))]
+
+# ----------------------------
+# Simplify to prevent millions of vertices (critical!)
+# Tune dTolerance: start 10–25 km.
+# ----------------------------
+combined_poly <- st_simplify(combined_poly, dTolerance = 20000, preserveTopology = TRUE) %>%
+  st_make_valid()
+
+# Optional: segmentize after simplify (keeps shape but caps segment length)
+# combined_poly <- st_segmentize(combined_poly, dfMaxLength = 25000)
+
+# Quick sanity checks
+print(st_geometry_type(combined_poly))
+cat("Outer vertex count:", nrow(st_coordinates(combined_poly)), "\n")
+```
+# feems python script adjusted
+So this is an adjusted version of the one that is found here https://github.com/NovembreLab/feems?tab=readme-ov-file. ChatGPT tidied it up and made it compatible with my inputs above.
+
+```{python}
+print("STEP 2: Prepare graph inputs")
+    print("=" * 70)
+
+    outer, edges, grid, _ = prepare_graph_inputs(
+        coord=coord,
+        ggrid=grid_path,
+        translated=args.translated,
+        buffer=args.buffer,
+        outer=outer_input
+    )
+
+    print(f"[INFO] Grid nodes: {len(grid)}")
+    print(f"[INFO] Graph edges: {len(edges)}")
+
+    print("\n" + "=" * 70)
+    print("STEP 3: Initialize SpatialGraph")
+    print("=" * 70)
+
+    sp_graph = SpatialGraph(genotypes, coord, grid, edges, scale_snps=True)
+    print("[INFO] SpatialGraph initialized.")
+
+    # CV (optional)
+    best_lamb = args.lamb
+    best_lamb_q = args.lamb_q
+
+    if args.run_cv:
+        print("\n" + "=" * 70)
+        print("STEP 4: Cross-validation (joint)")
+        print("=" * 70)
+
+        LAMB_GRID = parse_logspace_triplet(args.lamb_grid)
+        LAMB_Q_GRID = parse_logspace_triplet(args.lamb_q_grid)
+
+        print(f"[INFO] CV grid: {len(LAMB_GRID)} lamb x {len(LAMB_Q_GRID)} lamb_q")
+        print(f"[INFO] n_folds={args.n_folds}")
+
+        cv_err = run_cv_joint(
+            sp_graph,
+            LAMB_GRID,
+    
+```
+
+# feems as a slurm job
+```{bash}
+#!/bin/bash
+#
+#SBATCH --job-name=feems
+#SBATCH --output=feems.%j.out
+#SBATCH --error=feems.%j.err
+#SBATCH -t 23:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 11
+#SBATCH --mem=40G
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+
+set -x
+source ~/.bashrc
+
+conda activate feems_py310
+
+python h_run_feems.py \
+  --workdir /scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc \
+  --plink_prefix BANS.all.recode \
+  --coords BANS.coords.txt \
+  --outer BANS_breeding_outer.txt \
+  --grid BANS_breeding_grid_75km.shp \
+  --outdir feems_run1 \
+  --lamb 2.0 \
+  --lamb_q 10.0 \
+  --outlier_frac 0.01 \
+  --nedges 3 \
+  --top 5
+```

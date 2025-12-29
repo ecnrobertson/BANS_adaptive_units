@@ -16,30 +16,30 @@ library(data.table)
 ## missingness
 Let's just get some basic stats...
 ```{bash}
-vcftools --gzvcf ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz --missing-indv
+vcf="/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf.gz"
+vcftools --gzvcf $vcf --missing-indv
 ```
-<!-- After filtering, kept 229 out of 229 Individuals -->
-<!-- Outputting Individual Missingness -->
-<!-- After filtering, kept 3085135 out of a possible 3085135 Sites -->
+After filtering, kept 209 out of 209 Individuals
+Outputting Individual Missingness
+After filtering, kept 3124151 out of a possible 3124151 Sites
 
 ```{bash}
-bcftools stats ../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.stats.txt
+bcftools stats $vcf > BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.stats
 ```
-<!-- SN    [2]id     [3]key                [4]value -->
-<!-- SN      0       number of samples:      229 -->
-<!-- SN      0       number of records:      3085135 -->
-<!-- SN      0       number of no-ALTs:      0 -->
-<!-- SN      0       number of SNPs: 3085135 -->
-<!-- SN      0       number of MNPs: 0 -->
-<!-- SN      0       number of indels:       0 -->
-<!-- SN      0       number of others:       0 -->
-<!-- SN      0       number of multiallelic sites:   0 -->
-<!-- SN      0       number of multiallelic SNP sites:       0 -->
+SN      0       number of samples:      209
+SN      0       number of records:      3124151
+SN      0       number of no-ALTs:      0
+SN      0       number of SNPs: 3124151
+SN      0       number of MNPs: 0
+SN      0       number of indels:       0
+SN      0       number of others:       0
+SN      0       number of multiallelic sites:   0
+SN      0       number of multiallelic SNP sites:       0
 
 So, this all looks okay.
 
 ```{bash}
-rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf_final/eval/out.imiss /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/out.imiss /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/01.fastq_processing/
 ```
 
 ```{r}
@@ -62,21 +62,14 @@ ggplot(meta.all, aes(x = library, y = F_MISS, color = library)) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
 ```
 
-```{r}
-meta.best <- meta.all %>% filter(F_MISS<=.3)
-nrow(meta.best)
-```
-
-Well, the plate that I extracted has much lower missingness, and much less variable missingess. 209 individuals with low missingness is pretty good though.
-
-So now I'm worried about batch effects. Quick PCA to evaluate...
+Well, the plate that I extracted has much lower missingness, and much less variable missingess. But I did the individual level missingness filtering right and we're not seeing a huge spread or any outliers.
 
 # PCA for plate effects
 ##All Individuals
 #### pruning
 ```{bash}
 #GIVING SNP IDS
-vcf="../BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode.vcf.gz"
+vcf="/scratch/alpine/ericacnr@colostate.edu/BANS/01.fastq_processing/mega-non-model-wgs-snakeflow/results/bqsr-round-0/vcf/filtered_HC/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.recode.vcf.gz"
 
 conda activate GWAS2
 plink --vcf $vcf --aec --recode --out BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.0.8miss.recode
