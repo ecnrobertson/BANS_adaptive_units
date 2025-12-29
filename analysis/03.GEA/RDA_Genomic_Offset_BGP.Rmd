@@ -1,0 +1,176 @@
+---
+title: "RDA genomic offset for the BGP"
+author: "CH Bossu"
+date: "2025-10-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Genomic offset for CAWA
+
+Libraries needed
+```
+if (!require("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+BiocManager::install("LEA")
+```
+
+```{r}
+library(vegan)
+library(adegenet)
+library(tidyverse)
+require(readr)
+library(data.table)
+library(LEA)
+library(xlsx)
+```
+
+
+## Environmental data. 
+
+This is specifically for WorldClim version 2.1, but we might be changing to Chelsa and more biologically relevant variables. Also, they have ensemble future variables rather than 10-15 separate future models. 
+
+After talking with Joan, there are two we can focus on for the future models. Also, this will only work once I have the rasters loaded in the lfs
+
+```{r}
+source("src/generate_worldclim_rasterstack.R")
+```
+
+## Read in individual environmental data for 169 inds
+
+```{r}
+env<-read_delim("Bans_env_pop.txt",delim="\t")
+long_lat<-env %>% dplyr::select(Long,Lat)
+cawaSampled <- read.csv("../../data/BANS_all_sample_data_shifted.csv")
+
+
+pred <- env %>% dplyr::select(bio01:tree)
+pred <- scale(pred, center=TRUE, scale=TRUE) # center=TRUE, scale=TRUE are the defaults for scale()
+
+## Recovering scaling coefficients
+scale_env <- attr(pred, 'scaled:scale')
+center_env <- attr(pred, 'scaled:center')
+
+## Climatic table as data fram
+pred2<-as.data.frame(pred)
+row.names(pred2) <- c(cawaSampled$sample)
+
+```
+
+## Genomic data
+
+LEA formats the genomic data for RDA from a ped file.
+
+```
+ped2geno("cawa.bqsr.miss0.2.qual30.1X.fst85.filtRda.noIndel.gl_impute.ped","cawa.bqsr.miss0.2.qual30.1X.fst85.filtRda.noIndel.gl_impute.geno")
+output=geno2lfmm("cawa.bqsr.miss0.2.qual30.1X.fst85.filtRda.noIndel.gl_impute.geno","cawa.bqsr.miss0.2.qual30.1X.fst85.filtRda.noIndel.gl_impute.lfmm")
+```
+
+### Added individual column in awk using paste function and saved as a .txt
+
+```{r}
+gen.impall<-read.delim(file="input/cawa.bqsr.miss0.2.qual30.1X.fst85.filtRda.noIndel.gl_impute.lfmm_indcol.txt",sep="\t",row.names=1,header=F)
+dim(gen.impall) #confirm you have the correct # of inds
+```
+
+##PCA is RDA without environment.
+
+We are going to use PCA as the putative population structure. You can also use MEMs if you want.
+```{r}
+pca <- rda(gen.impall, scale=T)
+```
+
+## Forward variable selection of environmental variables
+
+### First run a model with intercept only
+```{r}
+cawa.mod0 <- rda(gen.impall  ~ 1, pred2) # Model with intercept only
+```
+
+
+### Then run a model iwth all explanatorry variables
+```{r}
+#cawa.rda.all <- rda(gen.impall ~ ., pred2) # Model with all explanatory variables
+#saveRDS(cawa.rda.all,"output/CAWA.RDAresutls.169Indiv_impute.all_env_b4_varsel.wc2.1.RDS")
+cawa.rda.all<-readRDS("output/CAWA.RDAresutls.169Indiv_impute.all_env_b4_varsel.wc2.1.RDS")
+
+
+RsquareAdj(cawa.rda.all)
+```
+
+## Example of ordiR2step (always forward), 1000 peermutations and p-vaue in 0.01 (pinelodge)
+
+```{r}
+mod<-ordiR2step(cawa.mod0,cawa.rda.all,direction="forward",R2permutations=1000,Pin=0.01,R2scope=T)  
+saveRDS(mod,"output/ForwardSel.CAWA.Env.UncorrectedPop.RDS")
+#mod$anova
+
+mod<-readRDS("output/ForwardSel.CAWA.Env.UncorrectedPop.RDS")
+```
+
+
+## Run an outlier model with just the chosen environmental varialbles
+```{r}
+#RDA_outliers <- rda(gen.impall ~ bio12 + bio03 + bio13 + tree + bio11 + bio09 + bio15,  pred2)
+#saveRDS(RDA_outliers,"output/CAWA.RDAoutliers.169Indiv_impute.wc2.1.RDS")
+RDA_outliers<-readRDS("output/CAWA.RDAoutliers.169Indiv_impute.wc2.1.RDS")
+RsquareAdj(RDA_outliers)
+#anova(RDA_outliers)
+```
+
+
+## Plot in PC space the relationship of these variables and the individuals
+```{r}
+TAB_loci <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="species", scaling="none"))
+TAB_var <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="bp"))
+
+pdf("figures/RDA_outlier.biplot.wc2.1.pdf")
+ggplot() +
+  geom_hline(yintercept=0, linetype="dashed", color = gray(.80), linewidth=0.6) +
+  geom_vline(xintercept=0, linetype="dashed", color = gray(.80), linewidth=0.6) +
+  geom_point(data = TAB_loci, aes(x=RDA1*3, y=RDA2*3), colour = "#EB8055FF", size = 2, alpha = 0.8) + #"#F9A242FF"
+  geom_segment(data = TAB_var, aes(xend=RDA1, yend=RDA2, x=0, y=0), colour="black", linewidth=0.15, linetype=1, arrow=arrow(length = unit(0.02, "npc"))) +
+  geom_text(data = TAB_var, aes(x=1.1*RDA1, y=1.1*RDA2, label = row.names(TAB_var)), size = 2.5, family = "Times") +
+  xlab("RDA 1 (XX%)") + ylab("RDA 2 (XX%)") +
+  facet_wrap(~"Adaptively not really enriched RDA space") +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(panel.grid = element_blank(), plot.background = element_blank(), panel.background = element_blank(), strip.text = element_text(size=11))
+dev.off()
+```
+
+
+#Adaptive landscape: projecting adaptive gradient(s) across space
+
+Note that Brenna plotted the adaptively enriched RDA- we are not subsetting to the super adpative loci, we are using all loci as recommended by Lotteros et al, but we do subset to the variables selected in the forward selection model
+
+```{r}
+#RDA_outliers <- rda(gen.impall ~ bio12 + bio03 + bio13 + tree + bio11 + bio09 + bio15,  pred2)
+#saveRDS(RDA_outliers,"output/CAWA.RDAoutliers.169Indiv_impute.wc2.1.RDS")
+RDA_outliers<-readRDS("output/CAWA.RDAoutliers.169Indiv_impute.wc2.1.RDS")
+RsquareAdj(RDA_outliers)
+#anova(RDA_outliers)
+```
+
+Now let's plot the RDA outliers
+```{r}
+TAB_loci <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="species", scaling="none"))
+TAB_var <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="bp"))
+
+pdf("figures/RDA_outlier.biplot.wc2.1.pdf")
+ggplot() +
+  geom_hline(yintercept=0, linetype="dashed", color = gray(.80), linewidth=0.6) +
+  geom_vline(xintercept=0, linetype="dashed", color = gray(.80), linewidth=0.6) +
+  geom_point(data = TAB_loci, aes(x=RDA1*3, y=RDA2*3), colour = "#EB8055FF", size = 2, alpha = 0.8) + #"#F9A242FF"
+  geom_segment(data = TAB_var, aes(xend=RDA1, yend=RDA2, x=0, y=0), colour="black", linewidth=0.15, linetype=1, arrow=arrow(length = unit(0.02, "npc"))) +
+  geom_text(data = TAB_var, aes(x=1.1*RDA1, y=1.1*RDA2, label = row.names(TAB_var)), size = 2.5, family = "Times") +
+  xlab("RDA 1 (XX%)") + ylab("RDA 2 (XX%)") +
+  facet_wrap(~"Adaptively not really enriched RDA space") +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(panel.grid = element_blank(), plot.background = element_blank(), panel.background = element_blank(), strip.text = element_text(size=11))
+dev.off()
+```

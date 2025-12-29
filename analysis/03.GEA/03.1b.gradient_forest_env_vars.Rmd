@@ -156,7 +156,7 @@ I've imputed the vcf already, following a different script, but here I will incl
 
 ```{bash}
 conda activate GWAS2
-vcf="/scratch/alpine/ericacnr@colostate.edu/BANS/02.imputation/BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.vcf.gz"
+vcf="/scratch/alpine/ericacnr@colostate.edu/BANS/02.imputation/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.vcf.gz"
 plink --vcf $vcf --aec --recode --out BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1
 
 #manually adding SNP names to the .map file, chromosome.SNP#

@@ -57,6 +57,8 @@ delta_na <- crop(delta, na_bbox)
 writeRaster(delta_na, "tmean_2022_minus_2012_NA.tif", overwrite=TRUE)
 
 plot(delta_na, main="Mean annual T (2022) − Mean annual T (2012) (°C)")
+
+plot(rast("spatial_predictors/tmean_2022_minus_2012_NA.tif"))
 ```
 
 ```{r}

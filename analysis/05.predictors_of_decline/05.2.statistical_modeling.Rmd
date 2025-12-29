@@ -176,7 +176,7 @@ No global smooth; AU-specific curves + AU mean shifts.
 
 ## Question 1
 Yes, including AU certainly improves the models.
-modG, which has no AU-temperature interaction, only has a deviance explained of 30.8%. The termperature smooth is strongly significant but so is the AU random effect. So, temperature alone is explaining some variation but also AU differences in mean abundance trend exist. When we include AU specific smoothing parameters, as in all other models, the deviance explained goes up 4.3% so 35.1% overall (generally, across models). So yes, it's a better model when you allow for AU specific responses.
+modG, which has no AU-temperature interaction, only has a deviance explained of 30.8%. The temperature smooth is strongly significant but so is the AU random effect. So, temperature alone is explaining some variation but also AU differences in mean abundance trend exist. When we include AU specific smoothing parameters, as in all other models, the deviance explained goes up 4.3% so 35.1% overall (generally, across models). So yes, it's a better model when you allow for AU specific responses.
 
 ## Question 2
 This is where it gets really cool. When you allow AUs to have *different* temperature response curves, the global smooth become irrelevant. GI exemplifies this the best, the global smooth basically vanishes in importance (p=0.776). So, this suggests that this species does *not* have one unified temperature-abundance trend relationship but rather that each AU has its own distinct cliamte response curve. In fact, we see not only that AU's have specific responses but that they vary in the shape of the curve and in mean abundance trends.
@@ -263,7 +263,6 @@ Highest deviance explained (35.1%)
 Lowest residual variance (Scale = 311.66)
 Strongest nonlinear response in AU1 (edf = 12.4, F = 205.9)
 Strong nonlinear response in AU2 (edf = 10.0, F = 42.8)
-
 *Tmax is the strongest climate driver of BANS abundance trends.*
 
 2. Second Best: soil_june_delta

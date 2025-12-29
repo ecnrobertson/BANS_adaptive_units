@@ -55,6 +55,100 @@ meta.sub <- meta %>%
 pops.latlong <- data.frame(BGP_ID=meta.sub$BGP_ID, Group = meta.sub$Pop, Lat=meta.sub$Lat, Long=meta.sub$Long)
 ```
 
+Now that we've defined our populations, let's create a file to filter with. Make the FID column (the first column) the same as in your .fam file. It's probably worth checking what that looks like now. It's likely either 0 or equal to IID. My FID == IID, so I'll populate both columns with BGP_ID here.
+```{r}
+pops <- data.frame(FID = meta.sub$BGP_ID, IID = meta.sub$BGP_ID, Group = meta.sub$Pop)
+pops %>% 
+  write.table(file = "BANS_sample_list_pop.tsv", sep= "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+Let's pop over to the cluster where our filtered & imputed vcf file is for the allele frequency calculations in plink. We'll want to throw the pop.txt file you created up there too.
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/BANS_adaptive_units/analysis/03.GEA/BANS_sample_list_pop.tsv ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/
+```
+# LD Pruning
+I've imputed the vcf already and done the LD pruning for the overall population structure.
+
+```{bash}
+bfile="BANS.all.recode"
+
+plink --bfile $bfile --aec --allow-no-sex --pca 208 \
+  --out pruned_allindv
+#2845717 variants and 209 people pass filters and QC.
+```
+
+# Calculating per Population Allele Frequency
+You will want to take the filtered, imputed, ld-pruned vcf you used for pop str and further filter individuals. Calculate per population allele frequency with plink.
+```{bash}
+vcf="/scratch/alpine/ericacnr@colostate.edu/BANS/02.imputation/BANS.all.ds6x.pass-maf-0.05.bialSNP.filtered.ind03miss.0.8miss.imputed4.1.final.vcf.gz"
+
+bfile="/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/pruned_allindv"
+
+plink --bfile $bfile --freq --within BANS_sample_list_pop.tsv --aec --out BANS.filtered.imputed.pruned.allindv
+```
+
+The main output of this is the BANS.filtered.imputed.pruned.allindv.frq.strat file which has the per pop allele freqs.
+
+## Subsample SNPs
+This file is pretty big, so to test the data we'll subset a sample of 50k snps. 
+
+### subsample allele freq file
+Let's get an interactive node on alpine to do this. You'll want to read in the plink file, subset, select allele frequency(MAF), SNP ID (SNP) and population (CLST), then transpose so that the allele frequency for each population is a row, and the subset of snps are the columns.
+
+```{bash}
+sinteractive --partition=amilan --time=02:00:00 --ntasks=4 --qos=normal
+mamba activate R
+R
+```
+
+We're going to sed seeds so it's reproducible, but the seed needs to change so that it's not randomly sampling the same set again and again.
+```{r}
+library(dplyr)
+library(tidyr)
+library(data.table)
+# SNP frequency data
+df <- fread("BANS.filtered.imputed.pruned.allindv.frq.strat", header = TRUE)
+
+val=1
+set.seed(40 + val)  # unique seed for each replicate (42, 43, 44, ...)
+sampled_snps <- df %>%
+  distinct(SNP) %>%
+  sample_n(50000)
+
+subset50k <- df %>%
+  filter(SNP %in% sampled_snps$SNP) %>%
+  select(SNP, CLST, MAF)
+ 
+# pivot to wide format (pops as rows, SNPs as columns)
+subset50k_wide <- subset50k %>%
+  pivot_wider(names_from = SNP, values_from = MAF) %>%
+  select(-CLST)  # remove CLST column after pivot
+
+out_file <- paste0("BANS.pop.frq.strat.50k.", val, ".txt")
+write.table(as.data.frame(subset50k_wide),
+            file = out_file, row.names = FALSE, quote = FALSE, sep = "\t")
+
+```
+
+### subsamples all SNPS
+Subsetting snps from the PLINK files that already exist (a little easier than pulling from the original vcf)
+```{bash}
+N=50000
+bfile="/scratch/alpine/ericacnr@colostate.edu/BANS/02.5.neutral_pop_struc/pruned_allindv"
+
+cut -f2 ${bfile}.bim | shuf -n $N > snps_50k.txt
+plink --bfile $bfile --extract snps_50k.txt --make-bed --out subsampled_pruned_allindv.50k
+
+plink --bfile subsampled_pruned_allindv.50k -aec --recode A --out subsampled_pruned_allindv.50k
+
+#recut header
+cut -d$'\t' -f7- subsampled_pruned_allindv.50k.raw > subsampled_noheader.raw
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/BANS/03.GEA/subsampled_noheader.raw /Users/ericarobertson/Desktop/BANS_adaptive_units/data
+```
+
 # RETRIEVE ENVIRONMENTAL VARIABLES
 
 Now we're loading in the environmental data that we got earlier.
@@ -78,7 +172,7 @@ clim <- meta.sub
 
 The populations file you create earlier in this markdown, and provide to plink to calculate allele frequencies within are almost certainly in the same order as the plink allele frequencies output. But just to be safe, I extract the order the populations are listed from the plink population allele frequency file, so that we can list the environmental predictors in the same order. Here is the command.
 ```{bash}
-awk 'NR>1 { if(!seen[$3]++) print $3 }' BANS.ds6x.maf.0.05.SNP.above4x.maxmiss.8.imputed4.1.ld25-10-0.5.frq.strat > BANS-frq-pop-order.txt
+awk 'NR>1 { if(!seen[$3]++) print $3 }' BANS.filtered.imputed.pruned.allindv.frq.strat > BANS-frq-pop-order.txt
 ```
 
 ```{bash}
@@ -99,58 +193,99 @@ env <- clim_ordered
 long_lat<-env %>% dplyr::select(Long,Lat)
 
 #skipping the last column which doesn't have any values
-pred <- env[,3:37]
-pred.vars <- colnames(pred[,c(-1,-2)])
+pred <- env[,1:38] %>% select(-"NA.")
+pred.vars <- colnames(pred[,5:37]) 
 
-pred[, pred.num] <- scale(env[, pred.num], center = TRUE, scale = TRUE) # center=TRUE, scale=TRUE are the defaults for scale()
-
-rownames(pred) <- env$BGP_ID
+pred.scale <- scale(pred[,pred.vars], center = TRUE, scale = TRUE) # center=TRUE, scale=TRUE are the defaults for scale()
+pred.scale <- as.data.frame(pred.scale)
+rownames(pred.scale) <- pred$BGP_ID
 
 genotypes <- fread("/Users/ericarobertson/Desktop/BANS_adaptive_units/data/subsampled_noheader.raw")
-genotypes.filt <- genotypes %>% filter(genotypes$FID %in% env$BGP_ID)
+genotypes.filt <- genotypes %>% filter(genotypes$FID %in% pred$BGP_ID)
 genotypes.clean <- genotypes.filt[,-(1:6)]
 rownames(genotypes.clean) <- genotypes$FID 
+```
+"Forward selection starts from a “null” model where the response is explained only by an intercept. Variables are then added to the model one by one to try to reach the amount of variance explained by a “full” model (i.e., model including all the explanatory variables), while limiting the amount of redundancy among included variables."
 
-bans.mod0 <- rda(genotypes.clean  ~ 1, pred2) # Model with intercept only
-bans.rda.all <- rda(genotypes.clean ~ bio01+bio02+bio03+bio04+
+```{r}
+#null model
+bans.mod0 <- rda(genotypes.clean  ~ 1, pred.scale) # Model with intercept only, R2 of 0
+
+#all env
+bans.rda.env <- rda(genotypes.clean ~ bio01+bio02+bio03+bio04+
                       bio05+bio06+bio07+bio08+bio09+bio10+
-                      bio11+bio12+bio13+bio14+bio16+
-                      bio17+bio18+bio19, pred) # Model with all explanatory variables
-saveRDS(bans.rda.all,"results/BANS.RDAresutls..all_env_b4_varsel.RDS")
-#bans.rda.all<-readRDS("bans.RDAresutls.109Indiv_impute.all_env_b4_varsel.RDS")
+                      bio11+bio12+bio13+bio14+bio15+bio16+
+                      bio17+bio18+bio19, pred.scale) # Model with all explanatory variables
+RsquareAdj(bans.rda.env) # 0.09653417
+saveRDS(bans.rda.env,"results/RDA_output/BANS.RDAresults.env_b4_varsel.RDS")
 
+#all soil
+bans.rda.soil <- rda(genotypes.clean ~ clay+sand+cfvo, pred.scale) # Model with all explanatory variables
+RsquareAdj(bans.rda.soil) # 0.01502391
+saveRDS(bans.rda.soil,"results/RDA_output/BANS.RDAresults.soil_b4_varsel.RDS")
 
-RsquareAdj(bans.rda.all)
-#$r.squared [1] 0.1542569
+#all landcover
+bans.rda.lc <- rda(genotypes.clean ~ Urban.and.Built.up + Water +
+                     Temperate.or.Subpolar.Shrubland + Cropland +
+                     Barren.Land + Mixed.Forest + Temperate.or.Subpolar.Broadleaf.Deciduous.Forest +
+                     Temperate.or.Subpolar.Grassland + Temperate.or.Subpolar.Needleaf.Forest +
+                     Wetland + Subpolar.Taiga.Needleleaf.Forest, pred.scale) # Model with all explanatory variables
+RsquareAdj(bans.rda.lc) # 0.05977912
+saveRDS(bans.rda.lc,"results/RDA_output/BANS.RDAresults.lc_b4_varsel.RDS")
 
-#$adj.r.squared [1] 0.02010453
-summary(eigenvals(bans.rda.all, model = "constrained"))
+#all variables
+bans.rda.vars <- rda(genotypes.clean ~ bio01+bio02+bio03+bio04+
+                      bio05+bio06+bio07+bio08+bio09+bio10+
+                      bio11+bio12+bio13+bio14+bio15+bio16+
+                      bio17+bio18+bio19+clay+sand+cfvo+
+                      Urban.and.Built.up + Water +
+                      Temperate.or.Subpolar.Shrubland + Cropland +
+                     Barren.Land + Mixed.Forest + Temperate.or.Subpolar.Broadleaf.Deciduous.Forest +
+                     Temperate.or.Subpolar.Grassland + Temperate.or.Subpolar.Needleaf.Forest +
+                     Wetland + Subpolar.Taiga.Needleleaf.Forest, pred.scale) # Model with all explanatory variables
+RsquareAdj(bans.rda.vars) # 0.1355833, adj.r.squared 0.01209524
+saveRDS(bans.rda.var,"results/RDA_output/BANS.RDAresults.allvars_b4_varsel.RDS")
 
+summary(eigenvals(bans.rda.vars, model = "constrained"))
 
-## Example of ordiR2step (always forward), 1000 peermutations and p-vaue in 0.01 (pinelodge)
-mod<-ordiR2step(bans.mod0,bans.rda.all,direction="forward",R2permutations=1000,Pin=0.01,R2scope=T)  
+## Example of ordiR2step (always forward), 1000 permutations and p-value in 0.01 (pinelodge)
+mod<-ordiR2step(bans.mod0,bans.rda.vars,direction="forward",R2permutations=1000,Pin=0.01,R2scope=T)  
 saveRDS(mod,"results/ForwardSel.bans.Env.UncorrectedPop.RDS")
 mod$anova
+vif.cca(mod)
+saveRDS(mod,"results/RDA_output/BANS.varsel_results.RDS")
 
-#bio02
-#bio14
-#bio09
-#bio19
 ```
+Some things of note about the selection parameters.
+direction="forward" : starts with no predictors, add them one at a time (alternatives are backward or both). forwards is preffered to avoid over-fitting from the get go.
+R2permutations=1000 : for each variable, the functions adds it to the model, runs a permutation test (here, 1000 permutations) and estimates a p-value for the increase in explained variance. more permutations = more stable p-values, 1000 is standard.
+Pin=0.01 : entry threshold (p-value cutoff). a variable is only added in the p_perm < 0.01. This is a fairly strict cutoff, 0.05 is more standard but can help reduce false positives.
+R2scope = T : the activates the double-stopping criterion, a variable is added only if BOTH are true, 1) is p-value is < pin, 2) the cumulative adjusted R2 of the model does not exceed the adjusted R2 of the full model. This prevents over-fitting and protects against adding weak but "significant" variables later in the process.
 
-For reference, the varaibles I got with GF were:
-WITHOUT LANDSCAPE DATA
-BIO2 = Mean Diurnal Range (Mean of monthly (max temp - min temp))
-BIO5 = Max Temperature of Warmest Month
-BIO7 = Temperature Annual Range (BIO5-BIO6)
-BIO3 = Isothermality (BIO2/BIO7) (×100)
+Results:
+                                                      R2.adj Df    AIC      F Pr(>F)   
++ Temperate.or.Subpolar.Shrubland                  0.0019305  1 1988.3 1.4023  0.002 **
++ Subpolar.Taiga.Needleleaf.Forest                 0.0039350  1 1988.9 1.4166  0.002 **
++ bio05                                            0.0054425  1 1989.5 1.3122  0.002 **
+(Mean Daily Maximum Near-Surface Air Temperature of the Warmest Month)
++ Temperate.or.Subpolar.Grassland                  0.0065911  1 1990.3 1.2370  0.002 **
++ Wetland                                          0.0072764  1 1991.1 1.1408  0.002 **
++ bio15                                            0.0079026  1 1991.9 1.1281  0.004 **
+(Precipitation Seasonality)
++ clay                                             0.0083920  1 1992.8 1.0997  0.002 **
++ Temperate.or.Subpolar.Broadleaf.Deciduous.Forest 0.0090394  1 1993.6 1.1313  0.002 **
++ sand                                             0.0096392  1 1994.5 1.1211  0.002 **
++ bio02                                            0.0100798  1 1995.3 1.0886  0.004 **
+(Mean Diurnal Near-Surface Air Temperature Range)
 
-WITH THE LANDSCAPE DATA:
-BIO16 = Precipitation of Wettest Quarter
-bioclay = g/kg
-BIO8 = Mean Temperature of Wettest Quarter
-BIO10 = Mean Temperature of Warmest Quarter
-BIO11 = Mean Temperature of Coldest Quarter
+```{r}
+# Get names of selected predictors
+top_vars <- attr(terms(mod), "term.labels")
+
+top_vars
+
+env %>% select(Pop, BGP_ID, Long, Lat, top_vars) %>% write.csv("BANS_topRDA_vars.csv")
+```
 
 # RUNNING FULL RDA MODEL
 ```{r}
